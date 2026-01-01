@@ -51,7 +51,7 @@ For the R7FA4M1AB you'll want to use the [`ra4m1`] pac.
  # Cargo.toml
  [dependencies]
 -# some-hal = "1.2.3"
-ra4m1 = { version = "0.2.1", git="https://github.com/ra-rs/ra", features = [ "rt"] }
++ra4m1 = { version = "0.2.1", git="https://github.com/ra-rs/ra", features = [ "rt"] }
 ```
 ### 5. Import your HAL
 
