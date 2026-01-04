@@ -1,6 +1,10 @@
 #![no_main]
 #![no_std]
 
+pub mod delay;
+pub mod hal;
+pub mod time;
+
 use defmt_rtt as _; // global logger
 
 // TODO(5) adjust HAL import
