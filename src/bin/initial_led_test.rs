@@ -2,7 +2,7 @@
 #![no_std]
 
 use cortex_m::delay::Delay;
-use uno_wifi_app::arduino_led_matrix::{ArduinoLEDMatrix, NUM_LEDS};
+use uno_wifi_app::arduino_led_matrix;
 use uno_wifi_app::hal::gpio::{Pin, PinMode, Port};
 use uno_wifi_app::{self as _, time::SYSCLK_FREQ}; // global logger + panicking-behavior + memory layout
 
@@ -42,18 +42,20 @@ fn main() -> ! {
     // defmt::println!("Pin 205: 0xb{:032b}", p205_pfs.read().bits());
 
     let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
-    let mut led_matrix = ArduinoLEDMatrix::new();
-    let mut idx = 5;
+    let mut p012 = Pin::new(Port::PORT0, 12, PinMode::Output);
+    let mut p205 = Pin::new(Port::PORT2, 5, PinMode::Output);
 
     defmt::println!("Entering main loop");
     loop {
-        led_matrix.on(idx);
-        delay.delay_ms(200);
-        led_matrix.off(idx);
-        idx += 2;
-        if idx >= NUM_LEDS as usize {
-            idx -= NUM_LEDS as usize;
-        }
+        p012.set_low();
+        p205.set_high();
+
+        delay.delay_ms(5);
+
+        p205.set_low();
+        p012.set_high();
+
+        delay.delay_ms(5);
     }
 
     // uno_wifi_app::exit()

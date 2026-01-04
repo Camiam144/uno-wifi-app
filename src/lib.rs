@@ -1,13 +1,13 @@
 #![no_main]
 #![no_std]
 
+pub mod arduino_led_matrix;
 pub mod delay;
 pub mod hal;
 pub mod time;
 
 use defmt_rtt as _; // global logger
 
-// TODO(5) adjust HAL import
 use ra4m1 as _; // memory layout
 
 use panic_probe as _;

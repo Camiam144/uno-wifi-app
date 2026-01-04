@@ -1,6 +1,7 @@
 use core::convert::Infallible;
 use core::marker::PhantomData;
 use embedded_hal::digital::{ErrorType, InputPin, OutputPin, PinState, StatefulOutputPin};
+use ra4m1::pfs::P000PFS;
 use ra4m1::port0;
 use ra4m1::port1;
 
@@ -107,6 +108,8 @@ impl Pin {
 
     /// Sets the pin I/O mode. Sets the PDR bit in the PCNTR1 register.
     /// Will silently fail if the PSEL bits or PMR bit in the PmnPFS register are set.
+    /// I should probably have a check for that, or have some sort of return value
+    /// if setting this fails.
     pub fn set_mode(&mut self, pin_mode: PinMode) {
         let reg = self.regs();
 
@@ -185,6 +188,7 @@ impl Pin {
             PinMode::Input
         }
     }
+
     pub fn read_state(&self) -> PinState {
         let podr_bits = match self.regs() {
             RegPtr::Port0Ptr(val) => unsafe { (*val).pcntr1().read().podr().bits() },
@@ -195,5 +199,12 @@ impl Pin {
         } else {
             PinState::Low
         }
+    }
+
+    pub fn is_high(&self) -> bool {
+        self.read_state() == PinState::High
+    }
+    pub fn is_low(&self) -> bool {
+        !self.is_high()
     }
 }
