@@ -43,17 +43,19 @@ fn main() -> ! {
 
     let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
     let mut led_matrix = ArduinoLEDMatrix::new();
-    let mut idx = 5;
+
+    let frame: [u32; 3] = [
+        0b00110001100001001010010001000100,
+        0b01000010000010000001000100000000,
+        0b10100000000001000000000000000000,
+    ];
+    led_matrix.load_frame(frame);
 
     defmt::println!("Entering main loop");
     loop {
-        led_matrix.on(idx);
-        delay.delay_ms(200);
-        led_matrix.off(idx);
-        idx += 2;
-        if idx >= NUM_LEDS as usize {
-            idx -= NUM_LEDS as usize;
-        }
+        led_matrix.render_frame();
+        delay.delay_us(20);
+        // led_matrix.clear();
     }
 
     // uno_wifi_app::exit()

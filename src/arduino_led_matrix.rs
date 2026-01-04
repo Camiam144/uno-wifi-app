@@ -1,4 +1,4 @@
-use core::ops::Deref;
+use core::{ops::Deref, ptr};
 
 use embedded_hal::digital::PinState;
 use ra4m1::PORT0;
@@ -116,11 +116,30 @@ const PINS: [[u8; 2]; 96] = [
 /// sure if that's the best call but eh.
 pub struct ArduinoLEDMatrix {
     pub rows: [Pin; 11],
+    // Private data
+    // The smallest way to store the matrix is an array of 3 u32 numbers, using
+    // the bits of the numbers for the true/false of the leds. Here we use the
+    // first number for LEDs 1-32, the 2nd for 33-64, and the 3rd for 65-96
+    framebuffer: [u32; 3],
 }
 
 const LEDPORT0BITMASK: u16 = (1 << 3) | (1 << 4) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 15);
 const LEDPORT2BITMASK: u16 = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 12) | (1 << 13);
+// This will be used in the interrupt driven display
+static mut I_ISR: usize = 0;
+// Arduio code also inits a framebuffer in memory and then memcpys the current
+// frame into it, I can do this later maybe, probably something to do with
+// handling interrupts
 
+fn read_i_isr() -> usize {
+    unsafe { ptr::read_volatile(&raw const I_ISR) }
+}
+
+fn write_i_isr(val: usize) {
+    unsafe {
+        ptr::write_volatile(&raw mut I_ISR, val);
+    }
+}
 impl ArduinoLEDMatrix {
     /// Initialize the matrix with the proper set of pins, all set to low.
     pub fn new() -> Self {
@@ -140,7 +159,48 @@ impl ArduinoLEDMatrix {
         for p in pins.iter_mut() {
             p.set_low();
         }
-        ArduinoLEDMatrix { rows: pins }
+        ArduinoLEDMatrix {
+            rows: pins,
+            framebuffer: [0, 0, 0],
+        }
+    }
+
+    pub fn on(&mut self, led_idx: usize) {
+        self.turn_led(led_idx, true);
+    }
+    pub fn off(&mut self, led_idx: usize) {
+        self.turn_led(led_idx, false);
+    }
+    pub fn clear(&mut self) {
+        let frame: [u32; 3] = [0, 0, 0];
+        self.framebuffer = frame;
+        self.draw_grid();
+    }
+
+    /// Load the single frame into the struct's framebuffer
+    pub fn load_frame(&mut self, frame: [u32; 3]) {
+        self.framebuffer = frame;
+        // defmt::println!("Loaded buffer:");
+        // for buf in self.framebuffer.iter() {
+        //     defmt::println!("{:032b}", buf);
+        // }
+        // defmt::println!("Reversed buffer:");
+        // for rbuf in self.framebuffer.iter() {
+        //     let rev = self.reverse(*rbuf);
+        //     defmt::println!("{:032b}", rev);
+        // }
+        let this_frame: [u32; 3] = [
+            self.reverse(self.framebuffer[0]),
+            self.reverse(self.framebuffer[1]),
+            self.reverse(self.framebuffer[2]),
+        ];
+
+        self.framebuffer = this_frame;
+    }
+
+    /// Render out the framebuffer
+    pub fn render_frame(&mut self) {
+        self.draw_grid();
     }
 
     /// Turn the whole grid off, then turn on the specific index if called for
@@ -152,8 +212,6 @@ impl ArduinoLEDMatrix {
             (*p1)
                 .pcntr1()
                 .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT0BITMASK));
-        }
-        unsafe {
             let p2 = ra4m1::PORT2::PTR;
             (*p2)
                 .pcntr1()
@@ -170,12 +228,28 @@ impl ArduinoLEDMatrix {
             low_pin.set_low();
         }
     }
-
-    pub fn on(&mut self, led_idx: usize) {
-        self.turn_led(led_idx, true);
+    /// Shamelessly stolen from the arduino code, need to learn why this bit twiddling works
+    fn reverse(&self, x: u32) -> u32 {
+        let mut x = ((x >> 1) & 0x55555555_u32) | ((x & 0x55555555_u32) << 1);
+        x = ((x >> 2) & 0x33333333_u32) | ((x & 0x33333333_u32) << 2);
+        x = ((x >> 4) & 0x0f0f0f0f_u32) | ((x & 0x0f0f0f0f_u32) << 4);
+        x = ((x >> 8) & 0x00ff00ff_u32) | ((x & 0x00ff00ff_u32) << 8);
+        x = ((x >> 16) & 0x0000ffff_u32) | ((x & 0x0000ffff_u32) << 16);
+        x
     }
-    pub fn off(&mut self, led_idx: usize) {
-        self.turn_led(led_idx, false);
+    /// This should fire on a timer. What I should do in order to mimic the
+    /// Arduino code is to write this as an ISR that steps through each of the
+    /// LEDs and toggles each one based on the frame information. Then I use
+    /// the ISR as a callback on a GPT timer instance. First lets just get it
+    /// working then we can make it good.
+    /// TODO: Rewrite this as an ISR that fires on a timer callback. I need a delay here
+    fn draw_grid(&mut self) {
+        let i_isr = read_i_isr();
+        self.turn_led(
+            i_isr,
+            (self.framebuffer[i_isr >> 5] & (1 << (i_isr & 31))) != 0,
+        );
+        write_i_isr((i_isr + 1) % NUM_LEDS as usize);
     }
 }
 
