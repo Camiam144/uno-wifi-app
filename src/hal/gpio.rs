@@ -1,7 +1,6 @@
-use core::convert::Infallible;
-use core::marker::PhantomData;
-use embedded_hal::digital::{ErrorType, InputPin, OutputPin, PinState, StatefulOutputPin};
-use ra4m1::pfs::P000PFS;
+// use core::convert::Infallible;
+// use core::marker::PhantomData;
+use embedded_hal::digital::{InputPin, OutputPin, PinState};
 use ra4m1::port0;
 use ra4m1::port1;
 
@@ -11,42 +10,11 @@ pub enum PinMode {
     Output,
 }
 
-impl PinMode {
-    fn val(&self) -> u16 {
-        match self {
-            Self::Input => 0b0,
-            Self::Output => 0b1,
-        }
-    }
-}
-
-// #[derive(Copy, Clone, PartialEq)]
-// #[repr(u16)]
-// pub enum PinLevel {
-//     Low = 0,
-//     High = 1,
-// }
-//
-// impl From<bool> for PinLevel {
-//     fn from(value: bool) -> Self {
-//         if value { PinLevel::High } else { PinLevel::Low }
-//     }
-// }
-//
-// impl From<PinLevel> for bool {
-//     fn from(value: PinLevel) -> Self {
-//         match value {
-//             PinLevel::High => true,
-//             PinLevel::Low => false,
-//         }
-//     }
-// }
-//
-// impl From<PinState> for PinLevel {
-//     fn from(value: PinState) -> Self {
-//         match value {
-//             PinState::High => PinLevel::High,
-//             PinState::Low => PinLevel::Low,
+// impl PinMode {
+//     fn val(&self) -> u16 {
+//         match self {
+//             Self::Input => 0b0,
+//             Self::Output => 0b1,
 //         }
 //     }
 // }
@@ -139,6 +107,34 @@ impl Pin {
                     }
                 }
             },
+        }
+    }
+    /// Handles locking and unlocking the register to write to the PMR bit in
+    /// the pfs register. 0 = general i/o pin 1 = peripherial I/O pin.
+    pub fn set_pmr_in_pfs(&mut self, state: PinState) {
+        let pmisc_ptr = ra4m1::PMISC::PTR;
+        let pin_pfs = ra4m1::PFS::PTR;
+        let port_offset: u32 = match self.port {
+            Port::PORT0 => 0,
+            Port::PORT1 => 0x40,
+            Port::PORT2 => 2 * 0x40,
+            Port::PORT3 => 3 * 0x40,
+            Port::PORT4 => 4 * 0x40,
+            Port::PORT5 => 5 * 0x40,
+            Port::PORT6 => 6 * 0x40,
+            Port::PORT7 => 7 * 0x40,
+            Port::PORT8 => 8 * 0x40,
+            Port::PORT9 => 9 * 0x40,
+        };
+
+        unsafe {
+            (*pmisc_ptr).pwpr.write(|w| w.b0wi().clear_bit());
+            (*pmisc_ptr).pwpr.write(|w| w.pfswe().set_bit());
+
+            // (*pin_pfs)
+
+            (*pmisc_ptr).pwpr.write(|w| w.pfswe().clear_bit());
+            (*pmisc_ptr).pwpr.write(|w| w.b0wi().set_bit());
         }
     }
     /// Set the pin state to high or low. See also .set_high() and .set_low()
