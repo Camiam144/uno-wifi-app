@@ -1,9 +1,10 @@
-use core::{ops::Deref, ptr};
+use crate::hal::gpio::erased::AnyPin;
+use crate::hal::{
+    gpio::Input,
+    timer::{CountDir, GPTSourceT, GPTimer, TimerCfg, TimerError, TimerModeT, TimerT, claim_timer},
+};
 
-use embedded_hal::digital::PinState;
-use ra4m1::PORT0;
-
-use crate::hal::gpio::{Pin, PinMode, Port};
+use core::ptr;
 
 // TODO: Figure out the graphics library
 
@@ -115,12 +116,14 @@ const PINS: [[u8; 2]; 96] = [
 /// to get the thing to work. I'm going to use the system timer for now, not
 /// sure if that's the best call but eh.
 pub struct ArduinoLEDMatrix {
-    pub rows: [Pin; 11],
-    // Private data
+    pins: [AnyPin<Input>; 11],
     // The smallest way to store the matrix is an array of 3 u32 numbers, using
     // the bits of the numbers for the true/false of the leds. Here we use the
     // first number for LEDs 1-32, the 2nd for 33-64, and the 3rd for 65-96
     framebuffer: [u32; 3],
+    // The timer shouldn't be optional, this struct should own a timer.
+    // Either it gets one during init or the programmer gets one and passes it in.
+    led_timer: Option<GPTimer>,
 }
 
 const LEDPORT0BITMASK: u16 = (1 << 3) | (1 << 4) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 15);
@@ -131,38 +134,47 @@ static mut I_ISR: usize = 0;
 // frame into it, I can do this later maybe, probably something to do with
 // handling interrupts
 
-fn read_i_isr() -> usize {
+/// Unsafe function to read the I_ISR val
+unsafe fn read_i_isr() -> usize {
     unsafe { ptr::read_volatile(&raw const I_ISR) }
 }
 
-fn write_i_isr(val: usize) {
+/// Unsafe function to write the I_ISR val
+/// Not sure why I did this besides to copy the C++ paradigm in the arduino code.
+unsafe fn write_i_isr(val: usize) {
     unsafe {
         ptr::write_volatile(&raw mut I_ISR, val);
     }
 }
 impl ArduinoLEDMatrix {
     /// Initialize the matrix with the proper set of pins, all set to low.
-    pub fn new() -> Self {
-        let mut pins = [
-            Pin::new(Port::PORT0, 3, PinMode::Output),
-            Pin::new(Port::PORT0, 4, PinMode::Output),
-            Pin::new(Port::PORT0, 11, PinMode::Output),
-            Pin::new(Port::PORT0, 12, PinMode::Output),
-            Pin::new(Port::PORT0, 13, PinMode::Output),
-            Pin::new(Port::PORT0, 15, PinMode::Output),
-            Pin::new(Port::PORT2, 4, PinMode::Output),
-            Pin::new(Port::PORT2, 5, PinMode::Output),
-            Pin::new(Port::PORT2, 6, PinMode::Output),
-            Pin::new(Port::PORT2, 12, PinMode::Output),
-            Pin::new(Port::PORT2, 13, PinMode::Output),
-        ];
-        for p in pins.iter_mut() {
-            p.set_low();
-        }
+    pub fn new(pins: [AnyPin<Input>; 11]) -> Self {
         ArduinoLEDMatrix {
-            rows: pins,
+            pins,
             framebuffer: [0, 0, 0],
+            led_timer: None,
         }
+    }
+
+    /// Handles the logic to set up a timer and the ISR callback
+    pub fn begin(&mut self) -> Result<(), TimerError> {
+        // TODO: Write the interrupt and callback
+        let timer_cfg = TimerCfg {
+            timer_type: TimerT::GPT_16_Timer,
+            count_direction: CountDir::Up,
+            gtssr: GPTSourceT::SOFTWARE,
+            gtpsr: GPTSourceT::SOFTWARE,
+            gtcsr: GPTSourceT::SOFTWARE,
+            mode: TimerModeT::PERIODIC,
+            freq: 10000,
+        };
+        let channel = claim_timer(&timer_cfg.timer_type)?;
+        let led_timer = GPTimer::new_from_config(timer_cfg, channel);
+        self.led_timer = Some(led_timer);
+        // TODO: Hook up the interrupt
+        self.led_timer.as_mut().unwrap().set_frequency(10000.0)?;
+        self.led_timer.as_mut().unwrap().start()?;
+        Ok(())
     }
 
     pub fn on(&mut self, led_idx: usize) {
@@ -204,9 +216,11 @@ impl ArduinoLEDMatrix {
     }
 
     /// Turn the whole grid off, then turn on the specific index if called for
+    /// idx must be 0 <= idx <= 95 (for our 96 grid LED)
     fn turn_led(&mut self, idx: usize, on: bool) {
         // Unsafe write to set the whole LED screen to low
-
+        // *TECHNICALLY* we should be doing this pin by pin but this is probably faster
+        // Should *TECHNICALLY* be safe enough because we own all of the pins
         unsafe {
             let p1 = ra4m1::PORT0::PTR;
             (*p1)
@@ -217,14 +231,18 @@ impl ArduinoLEDMatrix {
                 .pcntr1()
                 .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT2BITMASK));
         }
-
-        let [hi, lo] = PINS.get(idx).unwrap();
+        // Waste time here to make sure we're still aligned.
+        // Only other option is unsafely just doing whatever like we're in C++
+        for pin in self.pins.iter_mut() {
+            pin.into_input();
+        }
+        let [hi, lo] = &PINS.get(idx).unwrap();
         if on {
-            let high_pin = self.rows.get_mut(*hi as usize).unwrap();
-            high_pin.set_mode(PinMode::Output);
+            let high_pin = self.pins.get_mut(*hi as usize).unwrap();
+            high_pin.into_output();
             high_pin.set_high();
-            let low_pin = self.rows.get_mut(*lo as usize).unwrap();
-            low_pin.set_mode(PinMode::Output);
+            let low_pin = self.pins.get_mut(*lo as usize).unwrap();
+            low_pin.into_output();
             low_pin.set_low();
         }
     }
@@ -242,19 +260,13 @@ impl ArduinoLEDMatrix {
     /// LEDs and toggles each one based on the frame information. Then I use
     /// the ISR as a callback on a GPT timer instance. First lets just get it
     /// working then we can make it good.
-    /// TODO: Rewrite this as an ISR that fires on a timer callback. I need a delay here
+    /// TODO: Rewrite this as an ISR that fires on a timer callback.
     fn draw_grid(&mut self) {
-        let i_isr = read_i_isr();
+        let i_isr = unsafe { read_i_isr() };
         self.turn_led(
             i_isr,
             (self.framebuffer[i_isr >> 5] & (1 << (i_isr & 31))) != 0,
         );
-        write_i_isr((i_isr + 1) % NUM_LEDS as usize);
-    }
-}
-
-impl Default for ArduinoLEDMatrix {
-    fn default() -> Self {
-        Self::new()
+        unsafe { write_i_isr((i_isr + 1) % NUM_LEDS as usize) };
     }
 }

@@ -1,7 +1,4 @@
-use crate::hal::{
-    gpio::Pin,
-    timer::{self, GPTSourceT},
-};
+use crate::hal::timer::{self};
 // All we do here is set up one simple GPTimer on channel 2
 
 /// Enable the GPT 32 and 16 timers
@@ -86,32 +83,32 @@ pub fn get_timer() {
         // Set the Source Start, Stop, and Clear registers to the same source
         (*reg_ptr)
             .gtssr
-            .write(|w| w.bits(timer::GPTSourceT::GPT_SOURCE_SOFTWARE as u32));
+            .write(|w| w.bits(timer::GPTSourceT::SOFTWARE as u32));
         (*reg_ptr)
             .gtpsr
-            .write(|w| w.bits(timer::GPTSourceT::GPT_SOURCE_SOFTWARE as u32));
+            .write(|w| w.bits(timer::GPTSourceT::SOFTWARE as u32));
         (*reg_ptr)
             .gtcsr
-            .write(|w| w.bits(timer::GPTSourceT::GPT_SOURCE_SOFTWARE as u32));
+            .write(|w| w.bits(timer::GPTSourceT::SOFTWARE as u32));
         // Set count direction to up
         (*reg_ptr).gtuddtyc.modify(|r, w| w.bits(r.bits() | 1));
         // Set timer to periodic sawtooth and prescaler to 1024
         (*reg_ptr).gtcr.write(|w| {
             w.md()
-                .bits(timer::TimerModeT::TIMER_MODE_PERIODIC as u8)
+                .bits(timer::TimerModeT::PERIODIC as u8)
                 .tpcs()
                 .bits(timer::TimerPrescalerSelect::PCLKD_1024 as u8)
         });
         // More magic numbers "set for overall period" on gtpbr
-        // I'm choosing a prescaler of 1024 so my timer *should* be running at
-        // 48 MHz / 1024 ~= 46.875 kHz => 500 ms = 23438 counts = 0x5B8E
-        // 0x7FD = 2045
         (*reg_ptr).gtpr.write(|w| w.gtpr().bits(0xFFFF));
         (*reg_ptr).gtpbr.write(|w| w.gtpbr().bits(0xFFFF));
         // Clear the count, not sure which is correct
         (*reg_ptr).gtcnt.write(|w| w.gtcnt().bits(0_u32));
         // Set output on a, set to initial low, toggle on match, toggle on overflow
-        // Matching on gtioa for pin 115
+        // To set the duty cycle it looks like we set a compare match for the
+        // registers and then modify the pin to be how we want, for example
+        // have the pin initial output high, low on match, high on cycle end
+        // then write the actual counts necessary into gtccrc and e (comp match)
         (*reg_ptr).gtior.write(|w| {
             w.oae()
                 .set_bit()
@@ -125,7 +122,9 @@ pub fn get_timer() {
         // Not sure what these magic numbers are, but the note is "for 25/75 M/S clock"
         // 0x1FF = 0b111111111
         (*reg_ptr).gtccra.write(|w| w.bits(0x8000));
-        (*reg_ptr).gtccrb.write(|w| w.bits(0x0000));
+        (*reg_ptr).gtccrb.write(|w| w.bits(0x8000));
+        // (*reg_ptr).gtccrc.write(|w| w.bits(5000));
+        // (*reg_ptr).gtccre.write(|w| w.bits(5000));
         // (*reg_ptr).gtccrd.write(|w| w.bits(0x5B8E));
         // Enable buffering I guess
         (*reg_ptr)
@@ -166,23 +165,23 @@ pub fn get_timer() {
     // let mut p115 = Pin::new(super::gpio::Port::PORT1, 15, super::gpio::PinMode::Output);
 
     // Do the PWPR stuff on 115 to let it be used as a periph output
-    let pmisc_ptr = ra4m1::PMISC::PTR;
-    let pfs_ptr = ra4m1::PFS::PTR;
-    unsafe {
-        (*pmisc_ptr).pwpr.write(|w| w.b0wi().clear_bit());
-        (*pmisc_ptr).pwpr.write(|w| w.pfswe().set_bit());
-
-        (*pfs_ptr)
-            .p115pfs()
-            .write(|w| w.pmr().set_bit().psel().bits(0b00011).pdr().set_bit());
-
-        (*pmisc_ptr).pwpr.write(|w| w.pfswe().clear_bit());
-        (*pmisc_ptr).pwpr.write(|w| w.b0wi().set_bit());
-    }
-
-    let p115_pfs_val = unsafe { (*pfs_ptr).p115pfs().read().bits() };
-    defmt::println!("Final p115 pfs setting");
-    defmt::println!("0b{:032b}", p115_pfs_val);
+    // let pmisc_ptr = ra4m1::PMISC::PTR;
+    // let pfs_ptr = ra4m1::PFS::PTR;
+    // unsafe {
+    //     (*pmisc_ptr).pwpr.write(|w| w.b0wi().clear_bit());
+    //     (*pmisc_ptr).pwpr.write(|w| w.pfswe().set_bit());
+    //
+    //     (*pfs_ptr)
+    //         .p115pfs()
+    //         .write(|w| w.pmr().set_bit().psel().bits(0b00011).pdr().set_bit());
+    //
+    //     (*pmisc_ptr).pwpr.write(|w| w.pfswe().clear_bit());
+    //     (*pmisc_ptr).pwpr.write(|w| w.b0wi().set_bit());
+    // }
+    //
+    // let p115_pfs_val = unsafe { (*pfs_ptr).p115pfs().read().bits() };
+    // defmt::println!("Final p115 pfs setting");
+    // defmt::println!("0b{:032b}", p115_pfs_val);
     // Start the timer
     start_timer(channel);
     // Start the counter

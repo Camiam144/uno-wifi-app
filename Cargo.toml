@@ -59,10 +59,8 @@ defmt-rtt = "1.0"
 embedded-hal = "1.0.0"
 fugit = "0.3.9"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
-ra4m1 = { version = "0.2.1", git="https://github.com/ra-rs/ra", features = [ "rt"] }
+ra4m1 = { version = "0.2.1", git = "https://github.com/ra-rs/ra", features = ["critical-section", "rt"] }
 semihosting = "0.1.20"
-# TODO(4) enter your HAL here
-# some-hal = "1.2.3"
 
 
 [dev-dependencies]

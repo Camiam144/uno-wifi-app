@@ -9,6 +9,7 @@ pub mod time;
 use defmt_rtt as _; // global logger
 
 use ra4m1 as _; // memory layout
+pub use ra4m1 as pac;
 
 use panic_probe as _;
 

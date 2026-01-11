@@ -1,206 +1,713 @@
-// use core::convert::Infallible;
-// use core::marker::PhantomData;
-use embedded_hal::digital::{InputPin, OutputPin, PinState};
-use ra4m1::port0;
-use ra4m1::port1;
+/// Trying to do this in a way that makes sense with the embedded_hal types.
+/// This is so hard omg I have no idea what I'm doing.
+use core::marker::PhantomData;
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum PinMode {
-    Input,
-    Output,
+use embedded_hal::digital::PinState;
+
+pub mod erased;
+pub use erased::AnyPin;
+pub mod port0;
+pub mod port2;
+
+// Some stuff that comes out of PACs for other boards
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Modes {
+    Input = 0,
+    Output = 1,
+    // TODO: Encode these into the proper variants for my board
+    // They will need to live somewhere else, these are a different setup
+    // Alternate = 2,
+    // Analog = 3,
+}
+impl From<Modes> for bool {
+    #[inline(always)]
+    fn from(value: Modes) -> Self {
+        match value {
+            Modes::Input => false,
+            Modes::Output => true,
+        }
+    }
 }
 
-// impl PinMode {
-//     fn val(&self) -> u16 {
-//         match self {
-//             Self::Input => 0b0,
-//             Self::Output => 0b1,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputType {
+    PushPull = 0,
+    OpenDrain = 1,
+}
+impl From<OutputType> for bool {
+    #[inline(always)]
+    fn from(value: OutputType) -> Self {
+        match value {
+            OutputType::PushPull => false,
+            OutputType::OpenDrain => true,
+        }
+    }
+}
+
+pub trait GpioExt {
+    type Parts;
+    fn split(self) -> Self::Parts;
+}
+
+/// Id, port, and MODE for AnyPin so we can recover the typestate pin later
+/// TODO: Implement MODE to string
+pub trait PinExt {
+    type Mode;
+    fn pin_id(&self) -> u8;
+    fn port_id(&self) -> u8;
+    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>;
+}
+
+/// Unsafe function to unlock the pin register.
+///
+/// # Safety
+///
+/// Not sure, preferably use this when nothing is actively using the register.
+pub unsafe fn unlock_pmnpfs_register() {
+    let ptr = ra4m1::PMISC::PTR;
+    unsafe {
+        (*ptr).pwpr.write(|w| w.b0wi().clear_bit());
+        (*ptr).pwpr.write(|w| w.pfswe().set_bit());
+    }
+}
+
+/// Unsafe function to lock the pin register.
+///
+/// # Safety
+///
+/// Not sure, don't lock the register while trying to set pin peripherals or states
+pub unsafe fn lock_pmnpfs_register() {
+    let ptr = ra4m1::PMISC::PTR;
+    unsafe {
+        (*ptr).pwpr.write(|w| w.pfswe().clear_bit());
+        (*ptr).pwpr.write(|w| w.b0wi().set_bit());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drain {
+    /// CMOS
+    None = 0,
+    /// NMOS
+    Open = 1,
+}
+impl From<Drain> for bool {
+    fn from(value: Drain) -> Self {
+        match value {
+            Drain::None => false,
+            Drain::Open => true,
+        }
+    }
+}
+
+// We are not going to worry about alternate modes (like analog or Peripherals)
+// for now. That will come later.
+// TODO: Add alternate modes like analog and pmnpfs peripheral
+
+/// Generic input mode typestate
+#[derive(Debug, Default, defmt::Format)]
+pub struct Input;
+
+/// Pullup resistor settings (no pulldown resistors I can find for RA4M1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum Pull {
+    /// Floating
+    None = 0,
+    /// Pullup
+    Up = 1,
+}
+impl From<Pull> for bool {
+    fn from(value: Pull) -> Self {
+        match value {
+            Pull::None => false,
+            Pull::Up => true,
+        }
+    }
+}
+
+pub trait PinPull: Sized {
+    fn set_internal_resistor(&mut self, resistor: Pull);
+
+    #[inline(always)]
+    fn internal_resistor(mut self, resistor: Pull) -> Self {
+        self.set_internal_resistor(resistor);
+        self
+    }
+}
+
+impl PinPull for Input {
+    fn set_internal_resistor(&mut self, _resistor: Pull) {}
+    fn internal_resistor(mut self, _resistor: Pull) -> Self {
+        self
+    }
+}
+
+/// Generic Output type (default to output PushPull)
+#[derive(Debug, Default, defmt::Format)]
+pub struct Output<Otype = PushPull> {
+    _mode: PhantomData<Otype>,
+}
+
+/// Push pull output typestate
+#[derive(Debug, Default, defmt::Format)]
+pub struct PushPull;
+
+#[derive(Debug, Default, defmt::Format)]
+pub struct OutputOpenDrain;
+
+// Kinda stealing this from the STM32f4 hal crate, not sure if it's best practice
+// It looks like this is just a way to have some generics for the implementation
+// of the `into` code
+
+pub trait PinMode {
+    const PMODE: Option<Modes> = None;
+    const OUTTYPE: Option<OutputType> = None;
+    const AFR: Option<u8> = None;
+}
+impl PinMode for Input {
+    const PMODE: Option<Modes> = Some(Modes::Input);
+}
+impl PinMode for Output<OutputOpenDrain> {
+    const PMODE: Option<Modes> = Some(Modes::Output);
+    const OUTTYPE: Option<OutputType> = Some(OutputType::OpenDrain);
+}
+impl PinMode for Output<PushPull> {
+    const PMODE: Option<Modes> = Some(Modes::Output);
+    const OUTTYPE: Option<OutputType> = Some(OutputType::PushPull);
+}
+const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS::PTR;
+// const PMNPFS_REG_PORT_OFFSET: usize = 0x0040;
+// const PMNPFS_REG_PIN_OFFSET: usize = 0x0004;
+
+/// Generic Pin type
+///
+/// MODE is a pin mode
+/// - `P` is a port number as a u8
+/// - `N` is a pin number as a u8 from `0` to `15` the individual portX.rs crates
+///   handle assigning appropriate pins to ports
+///
+/// On this chip, pins are Input by default after a reset
+/// This current method means I cannot use pins 108, 109, 110, 201, 300, 408, or 914
+/// as they implement different register specs
+pub struct Pin<const P: u8, const N: u8, MODE = Input> {
+    _mode: PhantomData<MODE>,
+    pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
+}
+impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
+    pub fn new(pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>) -> Self {
+        Self {
+            _mode: PhantomData,
+            pfsreg,
+        }
+    }
+    // #[inline(always)]
+    // fn pfs(&self) -> &crate::pac::pfs::RegisterBlock {
+    //     unsafe { &*pfs_ptr::<P, N>() }
+    // }
+}
+
+impl<const P: u8, const N: u8, MODE> defmt::Format for Pin<P, N, MODE> {
+    // TODO: Figure out how to print MODE. Probably a match statement on a typed function
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "P{}{:02}", P, N);
+    }
+}
+impl<const P: u8, const N: u8, MODE> PinExt for Pin<P, N, MODE> {
+    type Mode = MODE;
+    #[inline(always)]
+    fn pin_id(&self) -> u8 {
+        N
+    }
+    #[inline(always)]
+    fn port_id(&self) -> u8 {
+        P
+    }
+    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC> {
+        self.pfsreg
+    }
+}
+
+impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
+    /// Sets the output of the pin regardless of mode
+    /// This can help avoid a short spike of the wrong value when changing pin
+    /// mode into output.
+    #[inline(always)]
+    fn _set_state(&mut self, state: PinState) {
+        match state {
+            PinState::High => self._set_high(),
+            PinState::Low => self._set_low(),
+        }
+    }
+    #[inline(always)]
+    fn _set_high(&mut self) {
+        self.pfsreg.modify(|_, w| w.podr().set_bit());
+    }
+    #[inline(always)]
+    fn _set_low(&mut self) {
+        self.pfsreg.modify(|_, w| w.podr().clear_bit());
+    }
+    #[inline(always)]
+    fn _is_set_high(&self) -> bool {
+        self.pfsreg.read().pidr().bit_is_set()
+    }
+    #[inline(always)]
+    fn _is_set_low(&self) -> bool {
+        self.pfsreg.read().pidr().bit_is_clear()
+    }
+}
+
+impl<const P: u8, const N: u8, MODE> Pin<P, N, Output<MODE>> {
+    /// Implementation of traits for generic output ports
+    #[inline(always)]
+    pub fn set_high(&mut self) {
+        self._set_high()
+    }
+    #[inline(always)]
+    pub fn set_low(&mut self) {
+        self._set_low()
+    }
+    #[inline(always)]
+    pub fn get_state(&self) -> PinState {
+        if self.is_set_low() {
+            PinState::Low
+        } else {
+            PinState::High
+        }
+    }
+    #[inline(always)]
+    pub fn is_set_low(&self) -> bool {
+        self._is_set_low()
+    }
+    #[inline(always)]
+    pub fn is_set_high(&self) -> bool {
+        !self.is_set_low()
+    }
+    #[inline(always)]
+    pub fn set_state(&mut self, state: PinState) {
+        match state {
+            PinState::High => self.set_high(),
+            PinState::Low => self.set_low(),
+        }
+    }
+    #[inline(always)]
+    pub fn toggle(&mut self) {
+        if self.is_set_low() {
+            self.set_high()
+        } else {
+            self.set_low()
+        }
+    }
+}
+
+impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: PinPull,
+{
+    /// Set the internal resistor in-place
+    pub fn set_internal_resistor(&mut self, resistor: Pull) {
+        self.pfsreg.modify(|_, w| w.pcr().bit(resistor.into()));
+    }
+    /// Set the internal resistor and create a new instance of Self
+    pub fn internal_resistor(mut self, resistor: Pull) -> Self {
+        self.set_internal_resistor(resistor);
+        self
+    }
+}
+
+// All of the `into` code should live here
+// TODO: implement the temporary "with" code that takes a closure
+impl Input {
+    pub fn new<const P: u8, const N: u8, MODE: PinMode>(
+        pin: Pin<P, N, MODE>,
+        pull: Pull,
+    ) -> Pin<P, N, Self> {
+        pin.into_mode().internal_resistor(pull)
+    }
+}
+
+impl<const P: u8, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
+    /// Configure the pin as an input pin.
+    pub fn into_input(self) -> Pin<P, N, Input> {
+        self.into_mode()
+    }
+    /// Configure as floating input
+    pub fn into_floating_input(self) -> Pin<P, N, Input> {
+        self.into_mode().internal_resistor(Pull::None)
+    }
+    /// Configure as input pull up
+    pub fn into_pullup_input(self) -> Pin<P, N, Input> {
+        self.into_mode().internal_resistor(Pull::Up)
+    }
+    /// Configure as push pull output, initial state will be low
+    pub fn into_push_pull_output(mut self) -> Pin<P, N, Output<PushPull>> {
+        self._set_low();
+        self.into_mode()
+    }
+    /// Configure as push pull output with provided initial state
+    pub fn into_push_pull_output_in_state(
+        mut self,
+        state: PinState,
+    ) -> Pin<P, N, Output<PushPull>> {
+        self._set_state(state);
+        self.into_mode()
+    }
+    /// Puts `self` into the provided mode `M` in place.
+    ///
+    /// In order to do this we have to violate type safety, so callers
+    /// must not cause havoc when calling this.
+    #[inline(always)]
+    pub fn mode<M: PinMode>(&mut self) {
+        if MODE::OUTTYPE != M::OUTTYPE
+            && let Some(outputtype) = M::OUTTYPE
+        {
+            self.pfsreg.modify(|_, w| w.ncodr().bit(outputtype.into()));
+        }
+
+        if MODE::PMODE != M::PMODE
+            && let Some(mode) = M::PMODE
+        {
+            self.pfsreg.modify(|_, w| w.pdr().bit(mode.into()));
+        }
+    }
+    /// Consume the pin and get a new one with the specified mode.
+    #[inline(always)]
+    pub fn into_mode<M: PinMode>(mut self) -> Pin<P, N, M> {
+        self.mode::<M>();
+        Pin::new(self.pfsreg)
+    }
+}
+impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
+    /// Erases the pin number and port from the type.
+    /// Useful when you need an array of pins with the same type
+    pub fn erase(self) -> AnyPin<MODE> {
+        AnyPin::new(P, N, self.pfsreg)
+    }
+}
+impl<const P: u8, const N: u8, MODE> From<Pin<P, N, MODE>> for AnyPin<MODE> {
+    /// Pin-to-AnyPin conversion
+    fn from(value: Pin<P, N, MODE>) -> Self {
+        value.erase()
+    }
+}
+
+// Here goes nuthin...
+// This is going to work pin-by-pin because I have a few special case pins I'll
+// need to deal with (a few pins can't be Output pins, they can only be input pins)
+// #[macro_export]
+// macro_rules! gpio_pin {
+//     ($Pin: ident, $pfs: ident, $port: ident, $pnum: ident, $MODE: ty) => {
+//         Pin::<$port, $pin, $MODE>new($pfs);
+//     };
+// }
+// #[macro_export]
+// macro_rules! gpio_pin {
+//     ($Pin:ident, $pfs:ident) => {
+//         impl $Pin<Input> {
+//             pub fn into_output(self) -> $Pin<Output> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.pdr().set_bit());
+//                 $Pin { _mode: PhantomData }
+//             }
+//             pub fn into_input_pullup(self, resistor: Pull) -> $Pin<InputPullUp> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| {
+//                     w.pmr()
+//                         .clear_bit()
+//                         .pdr()
+//                         .clear_bit()
+//                         .pcr()
+//                         .bit(resistor.into())
+//                 });
+//                 $Pin { _mode: PhantomData }
+//             }
+//             pub fn into_output_drain(self, drain: Drain) -> $Pin<OutputOpenDrain> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| {
+//                     w.pmr()
+//                         .clear_bit()
+//                         .pdr()
+//                         .clear_bit()
+//                         .ncodr()
+//                         .bit(drain.into())
+//                 });
+//                 $Pin { _mode: PhantomData }
+//             }
 //         }
+//         impl $Pin<Input> {
+//             pub fn is_high(&self) -> bool {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().read().pidr().bit_is_set()
+//             }
+//             pub fn is_low(&self) -> bool {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().read().pidr().bit_is_clear()
+//             }
+//         }
+//         impl<MODE> ErrorType for $Pin<MODE> {
+//             type Error = Infallible;
+//         }
+//         impl embedded_hal::digital::InputPin for $Pin<Input> {
+//             #[inline(always)]
+//             fn is_high(&mut self) -> Result<bool, Self::Error> {
+//                 Ok(Self::is_high(self))
+//             }
+//             #[inline(always)]
+//             fn is_low(&mut self) -> Result<bool, Self::Error> {
+//                 Ok(Self::is_low(self))
+//             }
+//         }
+//         impl $Pin<InputPullUp> {
+//             pub fn set_internal_resistor(&mut self, resistor: Pull) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.pcr().bit(resistor.into()));
+//             }
+//             pub fn is_high(&self) -> bool {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().read().pidr().bit_is_set()
+//             }
+//             pub fn is_low(&self) -> bool {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().read().pidr().bit_is_clear()
+//             }
+//         }
+//         impl embedded_hal::digital::InputPin for $Pin<InputPullUp> {
+//             #[inline(always)]
+//             fn is_high(&mut self) -> Result<bool, Self::Error> {
+//                 Ok(Self::is_high(self))
+//             }
+//             #[inline(always)]
+//             fn is_low(&mut self) -> Result<bool, Self::Error> {
+//                 Ok(Self::is_low(self))
+//             }
+//         }
+//         impl $Pin<Output> {
+//             pub fn into_input(self) -> $Pin<Input> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs()
+//                     .modify(|_, w| w.pmr().clear_bit().pdr().clear_bit());
+//                 $Pin { _mode: PhantomData }
+//             }
+//             pub fn into_input_pullup(self, resistor: Pull) -> $Pin<InputPullUp> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| {
+//                     w.pmr()
+//                         .clear_bit()
+//                         .pdr()
+//                         .clear_bit()
+//                         .pcr()
+//                         .bit(resistor.into())
+//                 });
+//                 $Pin { _mode: PhantomData }
+//             }
+//             pub fn into_output_drain(self, drain: Drain) -> $Pin<OutputOpenDrain> {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| {
+//                     w.pmr()
+//                         .clear_bit()
+//                         .pdr()
+//                         .clear_bit()
+//                         .ncodr()
+//                         .bit(drain.into())
+//                 });
+//                 $Pin { _mode: PhantomData }
+//             }
+//         }
+//         impl $Pin<Output> {
+//             pub fn set_high(&mut self) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.podr().set_bit());
+//             }
+//             pub fn set_low(&mut self) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.podr().clear_bit());
+//             }
+//         }
+//         impl embedded_hal::digital::OutputPin for $Pin<Output> {
+//             #[inline(always)]
+//             fn set_high(&mut self) -> Result<(), Self::Error> {
+//                 self.set_high();
+//                 Ok(())
+//             }
+//             #[inline(always)]
+//             fn set_low(&mut self) -> Result<(), Self::Error> {
+//                 self.set_low();
+//                 Ok(())
+//             }
+//             #[inline(always)]
+//             fn set_state(&mut self, state: PinState) -> Result<(), Self::Error> {
+//                 match state {
+//                     PinState::Low => {
+//                         self.set_low();
+//                         Ok(())
+//                     }
+//                     PinState::High => {
+//                         self.set_high();
+//                         Ok(())
+//                     }
+//                 }
+//             }
+//         }
+//         impl $Pin<OutputOpenDrain> {
+//             pub fn set_drain(&mut self, drain: Drain) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| {
+//                     w.pmr()
+//                         .clear_bit()
+//                         .pdr()
+//                         .clear_bit()
+//                         .ncodr()
+//                         .bit(drain.into())
+//                 });
+//             }
+//             pub fn set_high(&mut self) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.podr().set_bit());
+//             }
+//             pub fn set_low(&mut self) {
+//                 let ptr = unsafe { &*$crate::pac::PFS::PTR };
+//                 ptr.$pfs().modify(|_, w| w.podr().clear_bit());
+//             }
+//         }
+//         impl embedded_hal::digital::OutputPin for $Pin<OutputOpenDrain> {
+//             #[inline(always)]
+//             fn set_high(&mut self) -> Result<(), Self::Error> {
+//                 self.set_high();
+//                 Ok(())
+//             }
+//             #[inline(always)]
+//             fn set_low(&mut self) -> Result<(), Self::Error> {
+//                 self.set_low();
+//                 Ok(())
+//             }
+//             #[inline(always)]
+//             fn set_state(&mut self, state: PinState) -> Result<(), Self::Error> {
+//                 match state {
+//                     PinState::Low => {
+//                         self.set_low();
+//                         Ok(())
+//                     }
+//                     PinState::High => {
+//                         self.set_high();
+//                         Ok(())
+//                     }
+//                 }
+//             }
+//         }
+//     };
+// }
+
+// pub enum PfsRegBlock<'a> {
+//     PfsGeneric(&'a ra4m1::pfs::P000PFS),
+//     Pfs108(&'a ra4m1::pfs::P108PFS),
+//     Pfs109(&'a ra4m1::pfs::P109PFS),
+//     Pfs201(&'a ra4m1::pfs::P201PFS),
+//     Pfs408(&'a ra4m1::pfs::P408PFS),
+// }
+//
+// /// This function returns the appropriate pmnpfs register block
+// fn pmnpfsfn<const P: u8, const N: u8>() -> PfsRegBlock<'static> {
+//     // This is super painful, this can't be the best way? Should I just do
+//     // pointer math to get the block?
+//     let ptr = unsafe { *ra4m1::PFS::PTR };
+//     match (P, N) {
+//         (0, 0) => PfsRegBlock::PfsGeneric(ptr.p000pfs()),
+//         (0, 1) => PfsRegBlock::PfsGeneric(ptr.p001pfs()),
+//         (1, 8) => PfsRegBlock::Pfs108(ptr.p108pfs()),
+//         (_, _) => PfsRegBlock::PfsGeneric(ptr.p002pfs()),
 //     }
 // }
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Port {
-    PORT0,
-    PORT1,
-    PORT2,
-    PORT3,
-    PORT4,
-    PORT5,
-    PORT6,
-    PORT7,
-    PORT8,
-    PORT9,
+// These can all be in separate .rs files
+pub struct Port1;
+pub struct Port3;
+pub struct Port4;
+pub struct Port5;
+pub struct Port9;
+
+// match these up to the appropriate .rs files as we split up the HAL
+// Due to the specific nature of this board idk if there's a better way to do it.
+pub struct P100;
+pub struct P101;
+pub struct P102;
+pub struct P103;
+pub struct P104;
+pub struct P105;
+pub struct P106;
+pub struct P107;
+pub struct P108;
+pub struct P109;
+pub struct P110;
+pub struct P111;
+pub struct P112;
+pub struct P113;
+
+pub struct Port1Pins {
+    pub p100: P100,
+    pub p101: P101,
+    pub p102: P102,
+    pub p103: P103,
+    pub p104: P104,
+    pub p105: P105,
+    pub p106: P106,
+    pub p107: P107,
+    pub p108: P108,
+    pub p109: P109,
+    pub p110: P110,
+    pub p111: P111,
+    pub p112: P112,
+    pub p113: P113,
 }
 
-pub enum RegPtr {
-    Port0Ptr(*const port0::RegisterBlock),
-    Port1Ptr(*const port1::RegisterBlock),
+pub struct P300;
+pub struct P301;
+pub struct P302;
+pub struct P303;
+pub struct P304;
+
+pub struct Port3Pins {
+    pub p300: P300,
+    pub p301: P301,
+    pub p302: P302,
+    pub p303: P303,
+    pub p304: P304,
 }
 
-#[derive(Clone)]
-/// Represents a single GPIO pin. Allows for setting and changing state
-/// TODO: I might need something to deal with locked pins (like the InternalLED)
-/// but I can do that later
-pub struct Pin {
-    /// Port number 0-9
-    pub port: Port,
-    /// Pin number 0-15
-    pub pin: u8,
+pub struct P400;
+pub struct P401;
+pub struct P402;
+pub struct P407;
+pub struct P408;
+pub struct P409;
+pub struct P410;
+pub struct P411;
+
+pub struct Port4Pins {
+    pub p400: P400,
+    pub p401: P401,
+    pub p402: P402,
+    pub p407: P407,
+    pub p408: P408,
+    pub p409: P409,
+    pub p410: P410,
+    pub p411: P411,
 }
 
-impl Pin {
-    fn regs(&self) -> RegPtr {
-        match self.port {
-            Port::PORT0 => RegPtr::Port0Ptr(ra4m1::PORT0::PTR),
-            Port::PORT1 => RegPtr::Port1Ptr(ra4m1::PORT1::PTR),
-            Port::PORT2 => RegPtr::Port1Ptr(ra4m1::PORT2::PTR),
-            Port::PORT3 => RegPtr::Port1Ptr(ra4m1::PORT3::PTR),
-            Port::PORT4 => RegPtr::Port1Ptr(ra4m1::PORT4::PTR),
-            Port::PORT5 => RegPtr::Port0Ptr(ra4m1::PORT5::PTR),
-            Port::PORT6 => RegPtr::Port0Ptr(ra4m1::PORT6::PTR),
-            Port::PORT7 => RegPtr::Port0Ptr(ra4m1::PORT7::PTR),
-            Port::PORT8 => RegPtr::Port0Ptr(ra4m1::PORT8::PTR),
-            Port::PORT9 => RegPtr::Port0Ptr(ra4m1::PORT9::PTR),
-        }
-    }
-    // fn pin_mask(&self) -> u16 {
-    //     1 << self.pin
-    // }
-    pub fn new(port: Port, pin: u8, mode: PinMode) -> Self {
-        assert!(pin <= 15, "Pin must be 0-15");
-        let mut this_pin = Self { port, pin };
-        this_pin.set_mode(mode);
-        this_pin
-    }
+pub struct P500;
+pub struct P501;
+pub struct P502;
 
-    /// Sets the pin I/O mode. Sets the PDR bit in the PCNTR1 register.
-    /// Will silently fail if the PSEL bits or PMR bit in the PmnPFS register are set.
-    /// I should probably have a check for that, or have some sort of return value
-    /// if setting this fails.
-    pub fn set_mode(&mut self, pin_mode: PinMode) {
-        let reg = self.regs();
+pub struct Port5Pins {
+    pub p500: P500,
+    pub p501: P501,
+    pub p502: P502,
+}
 
-        // We need this because the different registers are different types
-        // in the PAC. This is true for any ra4m1 pacs as these port0/1 registers
-        // have different accesible fields I guess?
-        match reg {
-            RegPtr::Port0Ptr(val) => unsafe {
-                let pcntrl1 = (*val).pcntr1();
-                match pin_mode {
-                    PinMode::Input => {
-                        pcntrl1.modify(|r, w| w.pdr().bits(r.pdr().bits() & !(1 << self.pin)));
-                    }
-                    PinMode::Output => {
-                        pcntrl1.modify(|r, w| w.pdr().bits(r.pdr().bits() | 1 << self.pin));
-                    }
-                }
-            },
-            RegPtr::Port1Ptr(val) => unsafe {
-                let pcntrl1 = (*val).pcntr1();
-                match pin_mode {
-                    PinMode::Input => {
-                        pcntrl1.modify(|r, w| w.pdr().bits(r.pdr().bits() & !(1 << self.pin)));
-                    }
-                    PinMode::Output => {
-                        pcntrl1.modify(|r, w| w.pdr().bits(r.pdr().bits() | 1 << self.pin));
-                    }
-                }
-            },
-        }
-    }
-    /// Handles locking and unlocking the register to write to the PMR bit in
-    /// the pfs register. 0 = general i/o pin 1 = peripherial I/O pin.
-    pub fn set_pmr_in_pfs(&mut self, state: PinState) {
-        let pmisc_ptr = ra4m1::PMISC::PTR;
-        let pin_pfs = ra4m1::PFS::PTR;
-        let port_offset: u32 = match self.port {
-            Port::PORT0 => 0,
-            Port::PORT1 => 0x40,
-            Port::PORT2 => 2 * 0x40,
-            Port::PORT3 => 3 * 0x40,
-            Port::PORT4 => 4 * 0x40,
-            Port::PORT5 => 5 * 0x40,
-            Port::PORT6 => 6 * 0x40,
-            Port::PORT7 => 7 * 0x40,
-            Port::PORT8 => 8 * 0x40,
-            Port::PORT9 => 9 * 0x40,
-        };
+// Pins Cannot be output
+pub struct P914;
+pub struct P915;
 
-        unsafe {
-            (*pmisc_ptr).pwpr.write(|w| w.b0wi().clear_bit());
-            (*pmisc_ptr).pwpr.write(|w| w.pfswe().set_bit());
-
-            // (*pin_pfs)
-
-            (*pmisc_ptr).pwpr.write(|w| w.pfswe().clear_bit());
-            (*pmisc_ptr).pwpr.write(|w| w.b0wi().set_bit());
-        }
-    }
-    /// Set the pin state to high or low. See also .set_high() and .set_low()
-    /// Uses the PODR bit in the PCNTR1 register.
-    pub fn set_state(&mut self, state: PinState) {
-        // TODO: This is gross, should probably be a trait implementation somewhere
-        match self.regs() {
-            RegPtr::Port0Ptr(val) => unsafe {
-                let pcntrl1 = (*val).pcntr1();
-                match state {
-                    PinState::Low => {
-                        pcntrl1.modify(|r, w| w.podr().bits(r.podr().bits() & !(1 << self.pin)));
-                    }
-                    PinState::High => {
-                        pcntrl1.modify(|r, w| w.podr().bits(r.podr().bits() | 1 << self.pin));
-                    }
-                }
-            },
-            RegPtr::Port1Ptr(val) => unsafe {
-                let pcntrl1 = (*val).pcntr1();
-                match state {
-                    PinState::Low => {
-                        pcntrl1.modify(|r, w| w.podr().bits(r.podr().bits() & !(1 << self.pin)));
-                    }
-                    PinState::High => {
-                        pcntrl1.modify(|r, w| w.podr().bits(r.podr().bits() | 1 << self.pin));
-                    }
-                }
-            },
-        }
-    }
-    pub fn set_high(&mut self) {
-        self.set_state(PinState::High);
-    }
-    pub fn set_low(&mut self) {
-        self.set_state(PinState::Low);
-    }
-
-    pub fn read_mode(&self) -> PinMode {
-        let pdr_bits = match self.regs() {
-            RegPtr::Port0Ptr(val) => unsafe { (*val).pcntr1().read().pdr().bits() },
-            RegPtr::Port1Ptr(val) => unsafe { (*val).pcntr1().read().pdr().bits() },
-        };
-        if pdr_bits & (1 << self.pin) != 0 {
-            PinMode::Output
-        } else {
-            PinMode::Input
-        }
-    }
-
-    pub fn read_state(&self) -> PinState {
-        let podr_bits = match self.regs() {
-            RegPtr::Port0Ptr(val) => unsafe { (*val).pcntr1().read().podr().bits() },
-            RegPtr::Port1Ptr(val) => unsafe { (*val).pcntr1().read().podr().bits() },
-        };
-        if podr_bits & (1 << self.pin) != 0 {
-            PinState::High
-        } else {
-            PinState::Low
-        }
-    }
-
-    pub fn is_high(&self) -> bool {
-        self.read_state() == PinState::High
-    }
-    pub fn is_low(&self) -> bool {
-        !self.is_high()
-    }
+pub struct Port9Pins {
+    pub p914: P914,
+    pub p915: P915,
 }
