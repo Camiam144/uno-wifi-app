@@ -26,6 +26,13 @@ pub fn exit() -> ! {
     semihosting::process::exit(0);
 }
 
+/// Formatter for type names
+fn stripped_type_name<T>() -> &'static str {
+    let s = core::any::type_name::<T>();
+    let p = s.split("::");
+    p.last().unwrap()
+}
+
 /// Hardfault handler.
 ///
 /// Terminates the application and makes a semihosting-capable debug tool exit

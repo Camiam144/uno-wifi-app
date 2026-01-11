@@ -1,4 +1,5 @@
-use crate::hal::gpio::erased::AnyPin;
+use crate::hal::gpio::erased::{AnyPin, DynamicPinErased};
+use crate::hal::gpio::{Output, Pin, PinExt};
 use crate::hal::{
     gpio::Input,
     timer::{CountDir, GPTSourceT, GPTimer, TimerCfg, TimerError, TimerModeT, TimerT, claim_timer},
@@ -116,7 +117,9 @@ const PINS: [[u8; 2]; 96] = [
 /// to get the thing to work. I'm going to use the system timer for now, not
 /// sure if that's the best call but eh.
 pub struct ArduinoLEDMatrix {
-    pins: [AnyPin<Input>; 11],
+    /// These are the dynamic erased pins for internal use. Once the pins go in
+    /// to this driver, they never come out.
+    dynpins: [DynamicPinErased; 11],
     // The smallest way to store the matrix is an array of 3 u32 numbers, using
     // the bits of the numbers for the true/false of the leds. Here we use the
     // first number for LEDs 1-32, the 2nd for 33-64, and the 3rd for 65-96
@@ -148,9 +151,34 @@ unsafe fn write_i_isr(val: usize) {
 }
 impl ArduinoLEDMatrix {
     /// Initialize the matrix with the proper set of pins, all set to low.
-    pub fn new(pins: [AnyPin<Input>; 11]) -> Self {
-        ArduinoLEDMatrix {
-            pins,
+    pub fn new(
+        p003: Pin<0, 3, Input>,
+        p004: Pin<0, 4, Input>,
+        p011: Pin<0, 11, Input>,
+        p012: Pin<0, 12, Input>,
+        p013: Pin<0, 13, Input>,
+        p015: Pin<0, 15, Input>,
+        p204: Pin<2, 4, Input>,
+        p205: Pin<2, 5, Input>,
+        p206: Pin<2, 6, Input>,
+        p212: Pin<2, 12, Input>,
+        p213: Pin<2, 13, Input>,
+    ) -> Self {
+        let dynpins: [DynamicPinErased; 11] = [
+            p003.into_fully_erased_dynamic(),
+            p004.into_fully_erased_dynamic(),
+            p011.into_fully_erased_dynamic(),
+            p012.into_fully_erased_dynamic(),
+            p013.into_fully_erased_dynamic(),
+            p015.into_fully_erased_dynamic(),
+            p204.into_fully_erased_dynamic(),
+            p205.into_fully_erased_dynamic(),
+            p206.into_fully_erased_dynamic(),
+            p212.into_fully_erased_dynamic(),
+            p213.into_fully_erased_dynamic(),
+        ];
+        Self {
+            dynpins,
             framebuffer: [0, 0, 0],
             led_timer: None,
         }
@@ -192,15 +220,15 @@ impl ArduinoLEDMatrix {
     /// Load the single frame into the struct's framebuffer
     pub fn load_frame(&mut self, frame: [u32; 3]) {
         self.framebuffer = frame;
-        // defmt::println!("Loaded buffer:");
-        // for buf in self.framebuffer.iter() {
-        //     defmt::println!("{:032b}", buf);
-        // }
-        // defmt::println!("Reversed buffer:");
-        // for rbuf in self.framebuffer.iter() {
-        //     let rev = self.reverse(*rbuf);
-        //     defmt::println!("{:032b}", rev);
-        // }
+        defmt::println!("Loaded buffer:");
+        for buf in self.framebuffer.iter() {
+            defmt::println!("{:032b}", buf);
+        }
+        defmt::println!("Reversed buffer:");
+        for rbuf in self.framebuffer.iter() {
+            let rev = self.reverse(*rbuf);
+            defmt::println!("{:032b}", rev);
+        }
         let this_frame: [u32; 3] = [
             self.reverse(self.framebuffer[0]),
             self.reverse(self.framebuffer[1]),
@@ -221,29 +249,42 @@ impl ArduinoLEDMatrix {
         // Unsafe write to set the whole LED screen to low
         // *TECHNICALLY* we should be doing this pin by pin but this is probably faster
         // Should *TECHNICALLY* be safe enough because we own all of the pins
-        unsafe {
-            let p1 = ra4m1::PORT0::PTR;
-            (*p1)
-                .pcntr1()
-                .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT0BITMASK));
-            let p2 = ra4m1::PORT2::PTR;
-            (*p2)
-                .pcntr1()
-                .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT2BITMASK));
-        }
+        // unsafe {
+        //     let p1 = ra4m1::PORT0::PTR;
+        //     (*p1)
+        //         .pcntr1()
+        //         .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT0BITMASK));
+        //     let p2 = ra4m1::PORT2::PTR;
+        //     (*p2)
+        //         .pcntr1()
+        //         .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT2BITMASK));
+        // }
         // Waste time here to make sure we're still aligned.
         // Only other option is unsafely just doing whatever like we're in C++
-        for pin in self.pins.iter_mut() {
-            pin.into_input();
+        for pin in self.dynpins.iter_mut() {
+            pin.make_floating_input();
         }
         let [hi, lo] = &PINS.get(idx).unwrap();
         if on {
-            let high_pin = self.pins.get_mut(*hi as usize).unwrap();
-            high_pin.into_output();
-            high_pin.set_high();
-            let low_pin = self.pins.get_mut(*lo as usize).unwrap();
-            low_pin.into_output();
-            low_pin.set_low();
+            let high_pin = &mut self.dynpins[*hi as usize];
+            high_pin.make_push_pull_output();
+            // defmt::println!("Pin Hi: {}", high_pin);
+            // quick unsafe read to see if it's really high
+            // let reg = high_pin.pmnpfs_reg();
+            // let val = reg.read().bits();
+            // defmt::println!("{:032b}", val);
+            high_pin.set_high().unwrap();
+            // let val = reg.read().bits();
+            // defmt::println!("{:032b}", val);
+            let low_pin = &mut self.dynpins[*lo as usize];
+            low_pin.make_push_pull_output();
+            // defmt::println!("Pin lo: {}", low_pin);
+            // let reg = low_pin.pmnpfs_reg();
+            // let val = reg.read().bits();
+            // defmt::println!("{:032b}", val);
+            low_pin.set_low().unwrap();
+            // let val = reg.read().bits();
+            // defmt::println!("{:032b}", val);
         }
     }
     /// Shamelessly stolen from the arduino code, need to learn why this bit twiddling works

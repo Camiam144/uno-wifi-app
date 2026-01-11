@@ -6,6 +6,8 @@ use embedded_hal::digital::PinState;
 
 pub mod erased;
 pub use erased::AnyPin;
+
+use crate::hal::gpio::erased::DynamicPinErased;
 pub mod port0;
 pub mod port2;
 
@@ -67,8 +69,8 @@ pub trait PinExt {
 pub unsafe fn unlock_pmnpfs_register() {
     let ptr = ra4m1::PMISC::PTR;
     unsafe {
-        (*ptr).pwpr.write(|w| w.b0wi().clear_bit());
-        (*ptr).pwpr.write(|w| w.pfswe().set_bit());
+        (*ptr).pwpr.modify(|_, w| w.b0wi().clear_bit());
+        (*ptr).pwpr.modify(|_, w| w.pfswe().set_bit());
     }
 }
 
@@ -80,8 +82,8 @@ pub unsafe fn unlock_pmnpfs_register() {
 pub unsafe fn lock_pmnpfs_register() {
     let ptr = ra4m1::PMISC::PTR;
     unsafe {
-        (*ptr).pwpr.write(|w| w.pfswe().clear_bit());
-        (*ptr).pwpr.write(|w| w.b0wi().set_bit());
+        (*ptr).pwpr.modify(|_, w| w.pfswe().clear_bit());
+        (*ptr).pwpr.modify(|_, w| w.b0wi().set_bit());
     }
 }
 
@@ -208,9 +210,14 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
 }
 
 impl<const P: u8, const N: u8, MODE> defmt::Format for Pin<P, N, MODE> {
-    // TODO: Figure out how to print MODE. Probably a match statement on a typed function
     fn format(&self, fmt: defmt::Formatter) {
-        defmt::write!(fmt, "P{}{:02}", P, N);
+        defmt::write!(
+            fmt,
+            "P{}{:02}<{}>",
+            P,
+            N,
+            crate::stripped_type_name::<MODE>()
+        );
     }
 }
 impl<const P: u8, const N: u8, MODE> PinExt for Pin<P, N, MODE> {
@@ -375,6 +382,12 @@ impl<const P: u8, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
     pub fn into_mode<M: PinMode>(mut self) -> Pin<P, N, M> {
         self.mode::<M>();
         Pin::new(self.pfsreg)
+    }
+
+    /// Into a fully erased dynamic pin. Dynamic pin starts as floating input
+    #[inline]
+    pub fn into_fully_erased_dynamic(self) -> DynamicPinErased {
+        DynamicPinErased::new(P, N, erased::Dynamic::InputFloating, self.pfsreg)
     }
 }
 impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {

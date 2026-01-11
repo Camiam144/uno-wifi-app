@@ -3,7 +3,7 @@
 
 use cortex_m::delay::{self, Delay};
 use uno_wifi_app::arduino_led_matrix::ArduinoLEDMatrix;
-use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
+use uno_wifi_app::hal::gpio::{AnyPin, GpioExt, unlock_pmnpfs_register};
 use uno_wifi_app::hal::simple_timer::get_timer;
 use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -25,23 +25,22 @@ fn main() -> ! {
     let p0_pins = perph.PORT0.split();
     let p2_pins = perph.PORT2.split();
 
-    let p012 = p0_pins.p012;
-    let p205 = p2_pins.p205;
+    // let p012 = p0_pins.p012;
+    // let p205 = p2_pins.p205;
+    // let test012 = p012.into_input();
+    // let test205 = p205.into_input();
 
-    // These are in order of the lines in the spec sheet
-    // let matrix_pins = [
-    //     p0_pins.p003.erase(),
-    //     p0_pins.p004.erase(),
-    //     p0_pins.p011.erase(),
-    //     p0_pins.p012.erase(),
-    //     p0_pins.p013.erase(),
-    //     p0_pins.p015.erase(),
-    //     p2_pins.p204.erase(),
-    //     p2_pins.p205.erase(),
-    //     p2_pins.p206.erase(),
-    //     p2_pins.p212.erase(),
-    //     p2_pins.p213.erase(),
-    // ];
+    let p003 = p0_pins.p003;
+    let p004 = p0_pins.p004;
+    let p011 = p0_pins.p011;
+    let p012 = p0_pins.p012;
+    let p013 = p0_pins.p013;
+    let p015 = p0_pins.p015;
+    let p204 = p2_pins.p204;
+    let p205 = p2_pins.p205;
+    let p206 = p2_pins.p206;
+    let p212 = p2_pins.p212;
+    let p213 = p2_pins.p213;
 
     // defmt::println!("OFS0 values");
     // let ofs_addr: u32 = 0x00000400;
@@ -66,7 +65,9 @@ fn main() -> ! {
     // defmt::println!();
 
     let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
-    // let mut led_matrix = ArduinoLEDMatrix::new(matrix_pins);
+    let mut led_matrix = ArduinoLEDMatrix::new(
+        p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213,
+    );
     let heart: [u32; 3] = [
         0b00110001100001001010010001000100,
         0b01000010000010000001000100000000,
@@ -75,28 +76,31 @@ fn main() -> ! {
 
     let smile: [u32; 3] = [0x19819, 0x80000001, 0x81f8000];
 
-    let mut count_overflow = 0;
-    let mut num_seconds = 0;
-    let mut current_frame = 0;
+    // let mut count_overflow = 0;
+    // let mut num_seconds = 0;
+    // let mut current_frame = 0;
 
     let frames = [heart, smile];
-    // led_matrix.load_frame(frames[current_frame]);
+    led_matrix.load_frame(frames[0]);
     // let mut overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
 
     get_timer();
     defmt::println!("Entering main loop");
-    let mut p012 = p012.into_push_pull_output();
-    let mut p205 = p205.into_push_pull_output();
-    p012.set_low();
-    p205.set_low();
+    // p012.set_low();
+    // p205.set_low();
     loop {
-        p012.set_low();
-        p205.set_high();
+        // p012.set_low();
+        // p205.set_high();
+        //
+        // delay.delay_ms(250);
+        //
+        // p205.set_low();
+        // p012.set_high();
+        //
+        // delay.delay_ms(250);
 
-        delay.delay_ms(10);
-        p205.set_low();
-        p012.set_high();
-        delay.delay_ms(10);
+        led_matrix.render_frame();
+        delay.delay_us(100);
         // let overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
         //
         // if overflow_flag {
