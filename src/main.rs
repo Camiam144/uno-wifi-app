@@ -42,27 +42,21 @@ fn main() -> ! {
     let p212 = p2_pins.p212;
     let p213 = p2_pins.p213;
 
-    // defmt::println!("OFS0 values");
-    // let ofs_addr: u32 = 0x00000400;
-    // let ofs0_val = unsafe {
-    //     let ptr: *const u32 = ofs_addr as *const u32;
-    //     core::ptr::read(ptr)
-    // };
-    // defmt::println!("0b{:032b}", ofs0_val);
-    //
-    // defmt::println!("OFS1 values");
-    // let ofs1_addr: u32 = 0x00000404;
-    // let ofs1_val = unsafe {
-    //     let ptr: *const u32 = ofs1_addr as *const u32;
-    //     core::ptr::read(ptr)
-    // };
-    // defmt::println!("0b{:032b}", ofs1_val);
-    // defmt::println!("Some buffers");
-    // let ptr = ra4m1::PFS::PTR;
-    // unsafe {
-    //     let p002
-    // }
-    // defmt::println!();
+    defmt::println!("OFS0 values");
+    let ofs_addr: u32 = 0x00000400;
+    let ofs0_val = unsafe {
+        let ptr: *const u32 = ofs_addr as *const u32;
+        core::ptr::read(ptr)
+    };
+    defmt::println!("0b{:032b}", ofs0_val);
+
+    defmt::println!("OFS1 values");
+    let ofs1_addr: u32 = 0x00000404;
+    let ofs1_val = unsafe {
+        let ptr: *const u32 = ofs1_addr as *const u32;
+        core::ptr::read(ptr)
+    };
+    defmt::println!("0b{:032b}", ofs1_val);
 
     let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
     let mut led_matrix = ArduinoLEDMatrix::new(
@@ -76,9 +70,9 @@ fn main() -> ! {
 
     let smile: [u32; 3] = [0x19819, 0x80000001, 0x81f8000];
 
-    // let mut count_overflow = 0;
-    // let mut num_seconds = 0;
-    // let mut current_frame = 0;
+    let mut count_overflow: u32 = 0;
+    // let mut num_seconds: u32 = 0;
+    let mut current_frame: usize = 0;
 
     let frames = [heart, smile];
     led_matrix.load_frame(frames[0]);
@@ -86,37 +80,24 @@ fn main() -> ! {
 
     get_timer();
     defmt::println!("Entering main loop");
-    // p012.set_low();
-    // p205.set_low();
     loop {
-        // p012.set_low();
-        // p205.set_high();
-        //
-        // delay.delay_ms(250);
-        //
-        // p205.set_low();
-        // p012.set_high();
-        //
-        // delay.delay_ms(250);
+        // We should overflow roughly 9600 times per second
+        // timer running at approx 9600 hz
+        let overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
+        if overflow_flag {
+            // defmt::println!("Counter Overflow");
+            perph.GPT164.gtst.write(|w| w.tcfpo().clear_bit());
+            count_overflow += 1;
+            led_matrix.render_frame();
+        }
 
-        led_matrix.render_frame();
-        delay.delay_us(100);
-        // let overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
-        //
-        // if overflow_flag {
-        //     // defmt::println!("Counter Overflow");
-        //     perph.GPT164.gtst.write(|w| w.tcfpo().clear_bit());
-        //     count_overflow += 1;
-        //     led_matrix.render_frame();
-        //
-        //     if count_overflow % (4800) == 0 {
-        //         num_seconds += 1;
-        //         // defmt::println!("{}s", num_seconds);
-        //         current_frame += 1;
-        //         // defmt::println!("loading frame {}", current_frame);
-        //         led_matrix.load_frame(frames[current_frame % 2]);
-        //     }
-        // }
+        if (count_overflow % 9600) == 0 {
+            // num_seconds += 1;
+            // defmt::println!("{}s", num_seconds);
+            current_frame += 1;
+            // defmt::println!("loading frame {}", current_frame);
+            led_matrix.load_frame(frames[current_frame % 2]);
+        }
     }
     // uno_wifi_app::exit()
 }

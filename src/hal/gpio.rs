@@ -1,13 +1,14 @@
 /// Trying to do this in a way that makes sense with the embedded_hal types.
 /// This is so hard omg I have no idea what I'm doing.
-use core::marker::PhantomData;
+use core::{convert::Infallible, marker::PhantomData};
 
-use embedded_hal::digital::PinState;
+use embedded_hal::digital::{ErrorType, InputPin, PinState};
 
 pub mod erased;
 pub use erased::AnyPin;
 
 use crate::hal::gpio::erased::DynamicPinErased;
+mod ehal_1;
 pub mod port0;
 pub mod port2;
 
@@ -256,11 +257,27 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     }
     #[inline(always)]
     fn _is_set_high(&self) -> bool {
-        self.pfsreg.read().pidr().bit_is_set()
+        self.pfsreg.read().pdr().bit_is_set()
     }
     #[inline(always)]
     fn _is_set_low(&self) -> bool {
+        self.pfsreg.read().pdr().bit_is_clear()
+    }
+    #[inline(always)]
+    fn _is_high(&self) -> bool {
+        self.pfsreg.read().pidr().bit_is_set()
+    }
+    #[inline(always)]
+    fn _is_low(&self) -> bool {
         self.pfsreg.read().pidr().bit_is_clear()
+    }
+    #[inline(always)]
+    pub fn is_low(&self) -> bool {
+        self._is_low()
+    }
+    #[inline(always)]
+    pub fn is_high(&self) -> bool {
+        !self.is_low()
     }
 }
 

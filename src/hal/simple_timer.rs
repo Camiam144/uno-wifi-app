@@ -97,11 +97,11 @@ pub fn get_timer() {
             w.md()
                 .bits(timer::TimerModeT::PERIODIC as u8)
                 .tpcs()
-                .bits(timer::TimerPrescalerSelect::PCLKD_1024 as u8)
+                .bits(timer::TimerPrescalerSelect::PCLKD_4 as u8)
         });
         // More magic numbers "set for overall period" on gtpbr
-        (*reg_ptr).gtpr.write(|w| w.gtpr().bits(0xFFFF));
-        (*reg_ptr).gtpbr.write(|w| w.gtpbr().bits(0xFFFF));
+        (*reg_ptr).gtpr.write(|w| w.gtpr().bits(1250));
+        (*reg_ptr).gtpbr.write(|w| w.gtpbr().bits(1250));
         // Clear the count, not sure which is correct
         (*reg_ptr).gtcnt.write(|w| w.gtcnt().bits(0_u32));
         // Set output on a, set to initial low, toggle on match, toggle on overflow
@@ -109,7 +109,7 @@ pub fn get_timer() {
         // registers and then modify the pin to be how we want, for example
         // have the pin initial output high, low on match, high on cycle end
         // then write the actual counts necessary into gtccrc and e (comp match)
-        (*reg_ptr).gtior.write(|w| {
+        (*reg_ptr).gtior.modify(|_, w| {
             w.oae()
                 .set_bit()
                 .obe()
@@ -121,8 +121,8 @@ pub fn get_timer() {
         });
         // Not sure what these magic numbers are, but the note is "for 25/75 M/S clock"
         // 0x1FF = 0b111111111
-        (*reg_ptr).gtccra.write(|w| w.bits(0x8000));
-        (*reg_ptr).gtccrb.write(|w| w.bits(0x8000));
+        (*reg_ptr).gtccra.write(|w| w.bits(0xFFFF));
+        (*reg_ptr).gtccrb.write(|w| w.bits(0xFFFF));
         // (*reg_ptr).gtccrc.write(|w| w.bits(5000));
         // (*reg_ptr).gtccre.write(|w| w.bits(5000));
         // (*reg_ptr).gtccrd.write(|w| w.bits(0x5B8E));

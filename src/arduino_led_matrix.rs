@@ -220,15 +220,15 @@ impl ArduinoLEDMatrix {
     /// Load the single frame into the struct's framebuffer
     pub fn load_frame(&mut self, frame: [u32; 3]) {
         self.framebuffer = frame;
-        defmt::println!("Loaded buffer:");
-        for buf in self.framebuffer.iter() {
-            defmt::println!("{:032b}", buf);
-        }
-        defmt::println!("Reversed buffer:");
-        for rbuf in self.framebuffer.iter() {
-            let rev = self.reverse(*rbuf);
-            defmt::println!("{:032b}", rev);
-        }
+        // defmt::println!("Loaded buffer:");
+        // for buf in self.framebuffer.iter() {
+        //     defmt::println!("{:032b}", buf);
+        // }
+        // defmt::println!("Reversed buffer:");
+        // for rbuf in self.framebuffer.iter() {
+        //     let rev = self.reverse(*rbuf);
+        //     defmt::println!("{:032b}", rev);
+        // }
         let this_frame: [u32; 3] = [
             self.reverse(self.framebuffer[0]),
             self.reverse(self.framebuffer[1]),
