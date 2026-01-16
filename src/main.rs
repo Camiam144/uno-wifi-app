@@ -1,9 +1,9 @@
 #![no_main]
 #![no_std]
 
-use cortex_m::delay::{self, Delay};
+use cortex_m::delay::Delay;
 use uno_wifi_app::arduino_led_matrix::ArduinoLEDMatrix;
-use uno_wifi_app::hal::gpio::{AnyPin, GpioExt, unlock_pmnpfs_register};
+use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
 use uno_wifi_app::hal::simple_timer::get_timer;
 use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -25,11 +25,7 @@ fn main() -> ! {
     let p0_pins = perph.PORT0.split();
     let p2_pins = perph.PORT2.split();
 
-    // let p012 = p0_pins.p012;
-    // let p205 = p2_pins.p205;
-    // let test012 = p012.into_input();
-    // let test205 = p205.into_input();
-
+    // Pins for the LED screen driver
     let p003 = p0_pins.p003;
     let p004 = p0_pins.p004;
     let p011 = p0_pins.p011;
@@ -58,7 +54,7 @@ fn main() -> ! {
     };
     defmt::println!("0b{:032b}", ofs1_val);
 
-    let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
+    // let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
     let mut led_matrix = ArduinoLEDMatrix::new(
         p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213,
     );
@@ -76,7 +72,6 @@ fn main() -> ! {
 
     let frames = [heart, smile];
     led_matrix.load_frame(frames[0]);
-    // let mut overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
 
     get_timer();
     defmt::println!("Entering main loop");
@@ -85,7 +80,6 @@ fn main() -> ! {
         // timer running at approx 9600 hz
         let overflow_flag = perph.GPT164.gtst.read().tcfpo().bit();
         if overflow_flag {
-            // defmt::println!("Counter Overflow");
             perph.GPT164.gtst.write(|w| w.tcfpo().clear_bit());
             count_overflow += 1;
             led_matrix.render_frame();

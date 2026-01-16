@@ -1,10 +1,9 @@
-use crate::hal::gpio::erased::{AnyPin, DynamicPinErased};
-use crate::hal::gpio::{Output, Pin, PinExt};
+use crate::hal::gpio::Pin;
+use crate::hal::gpio::erased::DynamicPinErased;
 use crate::hal::{
     gpio::Input,
     timer::{CountDir, GPTSourceT, GPTimer, TimerCfg, TimerError, TimerModeT, TimerT, claim_timer},
 };
-
 use core::ptr;
 
 // TODO: Figure out the graphics library
@@ -261,6 +260,9 @@ impl ArduinoLEDMatrix {
         // }
         // Waste time here to make sure we're still aligned.
         // Only other option is unsafely just doing whatever like we're in C++
+        // Is there a better way to do this that doesn't involve iterating over
+        // the pins? I don't think so since I'm internally storing pin state
+        // I could have a "LED" pin class that's just raw reads/writes?
         for pin in self.dynpins.iter_mut() {
             pin.make_floating_input();
         }

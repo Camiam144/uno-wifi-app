@@ -9,8 +9,7 @@ pub use erased::AnyPin;
 
 use crate::hal::gpio::erased::DynamicPinErased;
 mod ehal_1;
-pub mod port0;
-pub mod port2;
+pub mod unor4;
 
 // Some stuff that comes out of PACs for other boards
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,16 +182,25 @@ const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS
 // const PMNPFS_REG_PORT_OFFSET: usize = 0x0040;
 // const PMNPFS_REG_PIN_OFFSET: usize = 0x0004;
 
+// Some pins are input only, these have to be either treated differently or
+// have a different struct or something
+// P200, P214, P215, are specifically called out as input only.
+// P408 has a different DSCR1 reg, too
+// P914/915 I think are used for the USBFS
+
 /// Generic Pin type
 ///
 /// MODE is a pin mode
 /// - `P` is a port number as a u8
-/// - `N` is a pin number as a u8 from `0` to `15` the individual portX.rs crates
-///   handle assigning appropriate pins to ports
+/// - `N` is a pin number as a u8 from `0` to `15`
 ///
 /// On this chip, pins are Input by default after a reset
 /// This current method means I cannot use pins 108, 109, 110, 201, 300, 408, or 914
 /// as they implement different register specs
+/// TODO: how do I do this nicely without needing to create a ton of different pins?
+/// this PAC has 4 extra types: p108pfs, p109pfs, p201pfs, and p408pfs to hold the
+/// different reset values. Probably have to make special pins for these. You can
+/// dereference the const ptr to the right pmnpfs but the spec type is different
 pub struct Pin<const P: u8, const N: u8, MODE = Input> {
     _mode: PhantomData<MODE>,
     pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
@@ -419,6 +427,39 @@ impl<const P: u8, const N: u8, MODE> From<Pin<P, N, MODE>> for AnyPin<MODE> {
     fn from(value: Pin<P, N, MODE>) -> Self {
         value.erase()
     }
+}
+
+// Macro for each port. Right now I just ignore pins I don't have set up or
+// are reserved for something
+// TODO: Some pins come in an array of pmnpfs like port 1. idk what to do, different macro?
+// Maybe I'll just implement those manually.
+#[macro_export]
+macro_rules! gpio_port {
+    ($PortN: ident, $PORTUPPER: ident, $portlower: ident, $port_num: expr, [$(($Pinupper: ident, $Pinlower:ident, $pin_num: expr,  $pfs:ident),)+]) => {
+        pub mod $portlower {
+        use $crate::hal::gpio::*;
+            pub struct $PortN;
+
+            pub struct Parts {
+        $(
+        pub $Pinlower: $Pinupper<Input>,
+    )+
+        }
+        impl GpioExt for $crate::pac::$PORTUPPER {
+        type Parts = Parts;
+        fn split(self) -> Parts {
+        Parts {
+        $(
+        $Pinlower: $Pinupper::new(unsafe { (*PMNPFS_BLOCK_BASE).$pfs()}),
+        )+
+        }
+        }
+        }
+        $(
+        pub type $Pinupper<Input> = Pin<$port_num, $pin_num, Input>;
+        )+
+        }
+    };
 }
 
 // Here goes nuthin...

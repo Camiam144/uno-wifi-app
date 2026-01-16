@@ -167,8 +167,7 @@ impl embedded_hal::digital::Error for PinModeError {
 /// need a collection of pins that all may have different states.
 /// These are way less safe to use than the other type state pins, so be careful.
 /// General idea is to ensure the pin is in the proper form and has proper ownership
-/// using the type state pins and then either convert to dynamic and erase immediately
-/// before passing to the driver or let the driver handle the erasure.
+/// using the type state pins and then let the driver handle the erasure.
 pub struct DynamicPinErased {
     pin_port: u8,
     mode: Dynamic,
