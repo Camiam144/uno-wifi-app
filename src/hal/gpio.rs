@@ -1,8 +1,8 @@
 /// Trying to do this in a way that makes sense with the embedded_hal types.
 /// This is so hard omg I have no idea what I'm doing.
-use core::{convert::Infallible, marker::PhantomData};
+use core::marker::PhantomData;
 
-use embedded_hal::digital::{ErrorType, InputPin, PinState};
+use embedded_hal::digital::PinState;
 
 pub mod erased;
 pub use erased::AnyPin;
@@ -690,79 +690,8 @@ macro_rules! gpio_port {
 // }
 
 // These can all be in separate .rs files
-pub struct Port1;
-pub struct Port3;
-pub struct Port4;
 pub struct Port5;
 pub struct Port9;
-
-// match these up to the appropriate .rs files as we split up the HAL
-// Due to the specific nature of this board idk if there's a better way to do it.
-pub struct P100;
-pub struct P101;
-pub struct P102;
-pub struct P103;
-pub struct P104;
-pub struct P105;
-pub struct P106;
-pub struct P107;
-pub struct P108;
-pub struct P109;
-pub struct P110;
-pub struct P111;
-pub struct P112;
-pub struct P113;
-
-pub struct Port1Pins {
-    pub p100: P100,
-    pub p101: P101,
-    pub p102: P102,
-    pub p103: P103,
-    pub p104: P104,
-    pub p105: P105,
-    pub p106: P106,
-    pub p107: P107,
-    pub p108: P108,
-    pub p109: P109,
-    pub p110: P110,
-    pub p111: P111,
-    pub p112: P112,
-    pub p113: P113,
-}
-
-pub struct P300;
-pub struct P301;
-pub struct P302;
-pub struct P303;
-pub struct P304;
-
-pub struct Port3Pins {
-    pub p300: P300,
-    pub p301: P301,
-    pub p302: P302,
-    pub p303: P303,
-    pub p304: P304,
-}
-
-pub struct P400;
-pub struct P401;
-pub struct P402;
-pub struct P407;
-pub struct P408;
-pub struct P409;
-pub struct P410;
-pub struct P411;
-
-pub struct Port4Pins {
-    pub p400: P400,
-    pub p401: P401,
-    pub p402: P402,
-    pub p407: P407,
-    pub p408: P408,
-    pub p409: P409,
-    pub p410: P410,
-    pub p411: P411,
-}
 
 pub struct P500;
 pub struct P501;

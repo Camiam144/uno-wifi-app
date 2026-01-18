@@ -1,11 +1,531 @@
-// This eventually needs to be something where you request a timer and if there
-// is one available you can get it, if not you get an error or false or something.
-// Arduino does this basically by keeping a list of how many timers are currently
-// running and passing the first available channel.
+/// This eventually needs to be something where you request a timer and if there
+/// is one available you can get it, if not you get an error or false or something.
+/// Arduino does this basically by keeping a list of how many timers are currently
+/// running and passing the first available channel.
+use core::marker::PhantomData;
 
-use core::sync::atomic::{AtomicU8, Ordering};
+/// Enable the GPT 32bit and 16bit timers
+///
+/// # Safety
+///
+/// Don't write to this register if timers are already running I think?
+pub unsafe fn enable_gptimers() {
+    let gpt_stopreg = crate::pac::MSTP::PTR;
+    // Enable gpt_16 & gpt_32 timer module
+    unsafe {
+        (*gpt_stopreg)
+            .mstpcrd
+            .modify(|r, w| w.bits(r.bits() & !(0b11 << 5)));
+    }
+}
 
-/// Sources can be used to start the timer, stop the timer, count up, or count down. These enumerations represent a bitmask. Multiple sources can be ORed together.
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+pub enum Prescaler {
+    PCLKD_1 = 0,
+    PCLKD_4 = 1,
+    PCLKD_16 = 2,
+    PCLKD_64 = 3,
+    PCLKD_256 = 4,
+    PCLKD_1024 = 5,
+}
+impl Prescaler {
+    pub fn divisor(&self) -> u32 {
+        match self {
+            Prescaler::PCLKD_1 => 1,
+            Prescaler::PCLKD_4 => 4,
+            Prescaler::PCLKD_16 => 16,
+            Prescaler::PCLKD_64 => 64,
+            Prescaler::PCLKD_256 => 256,
+            Prescaler::PCLKD_1024 => 1024,
+        }
+    }
+}
+
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub enum TimerMode {
+    /// Timer restarts after period elapses.
+    PERIODIC = 0,
+    /// Timer stops after period elapses.
+    ONE_SHOT = 1,
+}
+
+/// Select the type of PWM shape (can also use sawtooth with compare match regs)
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+#[derive(Debug, Copy, Clone)]
+pub enum PwmMode {
+    /// Sawtooth Wave Mode (must set compare match register)
+    SAWTOOTH_WAVE_PWM = 0,
+    /// Timer generates symmetric triangle-wave PWM output.
+    TRIANGLE_WAVE_SYMMETRIC_PWM = 4,
+    /// Timer generates asymmetric triangle-wave PWM output.
+    TRIANGLE_WAVE_ASYMMETRIC_PWM = 5,
+    /// Timer generates Asymmetric Triangle-wave PWM output. In PWM mode 3, the duty cycle does
+    /// not need to be updated at each tough/crest interrupt. Instead, the trough and crest duty cycle values can be
+    /// set once and only need to be updated when the application needs to change the duty cycle.
+    TRIANGLE_WAVE_ASYMMETRIC_PWM_MODE3 = 6,
+}
+
+// Not sure if I need these or if these should be connected to the specific timer.
+// Some sort of big ol' match statement?
+#[derive(Debug, Clone, Copy)]
+pub enum CountDir {
+    Down,
+    Up,
+}
+impl From<bool> for CountDir {
+    fn from(value: bool) -> Self {
+        if value { CountDir::Up } else { CountDir::Down }
+    }
+}
+impl From<CountDir> for bool {
+    fn from(value: CountDir) -> Self {
+        match value {
+            CountDir::Down => false,
+            CountDir::Up => true,
+        }
+    }
+}
+
+// Type states for timer readiness
+pub struct Unconfigured;
+pub struct Configured;
+
+// Type states for timer mode
+pub struct NotSet;
+pub struct Periodic;
+pub struct OneShot;
+pub struct Pwm;
+pub struct InputCapture; // Less important
+
+// /// Idk if I need to do all of this sealing stuff, this isn't a lib yet.
+// /// LLMs like to do it because they see it in library code but... eh...
+// mod private {
+//     pub trait Sealed {}
+// }
+
+pub trait TimerSize {
+    // TODO: Some check here that we have an actual valid unsigned int.
+    // LLMS want to add From<u32> but that fails for u16.
+    //
+    // If I leave this as From<u16> will this work? It's just a trait bound...
+    type CounterType: Copy + Into<u32> + defmt::Format;
+    fn max_value() -> Self::CounterType;
+}
+
+pub struct Bits32;
+impl TimerSize for Bits32 {
+    type CounterType = u32;
+    fn max_value() -> u32 {
+        Self::CounterType::MAX
+    }
+}
+
+pub struct Bits16;
+impl TimerSize for Bits16 {
+    type CounterType = u16;
+    fn max_value() -> u16 {
+        Self::CounterType::MAX
+    }
+}
+
+pub enum TimerRegBlock {
+    Block32(*const ra4m1::gpt320::RegisterBlock),
+    Block16(*const ra4m1::gpt162::RegisterBlock),
+}
+
+/// Generic trait across all timers types
+/// I can't put the register here because there's a 320 block and a 162 block.
+pub trait TimerInstance {
+    type Width: TimerSize;
+    const CHANNEL: u8;
+    const BLOCK: TimerRegBlock;
+}
+
+// Is there a better way to do this? Unsure as of now.
+pub trait TimerExt {
+    type Timer;
+    fn into_timer(self) -> Self::Timer;
+}
+
+macro_rules! gptimer {
+    ($GPTNAME: ident, $Gptname: ident, $Bits: ty, $Block: ident, $Ch: expr) => {
+        impl TimerInstance for $Gptname {
+            type Width = $Bits;
+            const CHANNEL: u8 = $Ch;
+            const BLOCK: TimerRegBlock = TimerRegBlock::$Block(ra4m1::$GPTNAME::PTR);
+        }
+
+        impl TimerExt for $crate::pac::$GPTNAME {
+            type Timer = GPTimer<$Gptname, Unconfigured, NotSet>;
+            fn into_timer(self) -> GPTimer<$Gptname, Unconfigured, NotSet> {
+                GPTimer::<$Gptname, Unconfigured, NotSet>::new()
+            }
+        }
+    };
+}
+
+// Stick these here to help rust analyzer a bit
+pub struct Gpt0;
+pub struct Gpt1;
+pub struct Gpt2;
+pub struct Gpt3;
+pub struct Gpt4;
+pub struct Gpt5;
+pub struct Gpt6;
+pub struct Gpt7;
+
+gptimer!(GPT320, Gpt0, Bits32, Block32, 0);
+gptimer!(GPT321, Gpt1, Bits32, Block32, 1);
+gptimer!(GPT162, Gpt2, Bits16, Block16, 2);
+gptimer!(GPT163, Gpt3, Bits16, Block16, 3);
+gptimer!(GPT164, Gpt4, Bits16, Block16, 4);
+gptimer!(GPT165, Gpt5, Bits16, Block16, 5);
+gptimer!(GPT166, Gpt6, Bits16, Block16, 6);
+gptimer!(GPT167, Gpt7, Bits16, Block16, 7);
+
+// THis should be read from somewhere
+const MCU_FREQ: u32 = 48_000_000;
+
+/// Generic timer struct
+pub struct GPTimer<T: TimerInstance, CFG, MODE> {
+    _instance: PhantomData<T>,
+    _cfg: PhantomData<CFG>,
+    _mode: PhantomData<MODE>,
+}
+
+#[allow(clippy::new_without_default)]
+impl<T: TimerInstance, CFG, MODE> GPTimer<T, CFG, MODE> {
+    pub fn new() -> Self {
+        Self {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+
+    fn _set_periodic_mode(&self, pmode: TimerMode) {
+        // There has got to be some way to make this less verbose. I guess
+        // I could dispatch each of the 28 fields to the enum?
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe { (*val).gtcr.write(|w| w.md().bits(pmode as u8)) };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe { (*val).gtcr.write(|w| w.md().bits(pmode as u8)) };
+            }
+        }
+    }
+
+    fn _set_pwm_mode(&self, pwmmode: PwmMode) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe { (*val).gtcr.write(|w| w.md().bits(pwmmode as u8)) };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe { (*val).gtcr.write(|w| w.md().bits(pwmmode as u8)) };
+            }
+        }
+    }
+
+    fn _set_period_count(&self, count: u32) {
+        // Silently drop the extra counts if we somehow try to shove 32 bits into
+        // a 16 bit timer.
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtpr.write(|w| w.gtpr().bits(count));
+                    (*val).gtpbr.write(|w| w.gtpbr().bits(count));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtpr.write(|w| w.gtpr().bits(count));
+                    (*val).gtpbr.write(|w| w.gtpbr().bits(count));
+                };
+            }
+        }
+    }
+
+    fn _set_prescaler(&self, prescaler: Prescaler) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe { (*val).gtcr.modify(|_, w| w.tpcs().bits(prescaler as u8)) };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe { (*val).gtcr.modify(|_, w| w.tpcs().bits(prescaler as u8)) };
+            }
+        }
+    }
+
+    fn _set_count_dir(&self, dir: CountDir) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtuddtyc.write(|w| w.ud().bit(dir.into()));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtuddtyc.write(|w| w.ud().bit(dir.into()));
+                };
+            }
+        }
+    }
+
+    fn _set_gtssr(&self, gtssr_src: GPTSourceT) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtssr.write(|w| w.bits(gtssr_src as u32));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtssr.write(|w| w.bits(gtssr_src as u32));
+                };
+            }
+        }
+    }
+
+    fn _set_gtpsr(&self, gtpsr_src: GPTSourceT) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtpsr.write(|w| w.bits(gtpsr_src as u32));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtpsr.write(|w| w.bits(gtpsr_src as u32));
+                };
+            }
+        }
+    }
+    fn _set_gtcsr(&self, gtcsr_src: GPTSourceT) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtcsr.write(|w| w.bits(gtcsr_src as u32));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtcsr.write(|w| w.bits(gtcsr_src as u32));
+                };
+            }
+        }
+    }
+    // I probably need some checks so this doesn't get called incorrectly?
+    // Plus I think this only works if the GTSSR is set to software.
+    fn _start(&self) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val)
+                        .gtstr
+                        .modify(|r, w| w.bits(r.bits() | 1 << T::CHANNEL));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val)
+                        .gtstr
+                        .modify(|r, w| w.bits(r.bits() | 1 << T::CHANNEL));
+                };
+            }
+        }
+    }
+    fn _stop(&self) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val)
+                        .gtstp
+                        .modify(|r, w| w.bits(r.bits() | 1 << T::CHANNEL));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val)
+                        .gtstp
+                        .modify(|r, w| w.bits(r.bits() | 1 << T::CHANNEL));
+                };
+            }
+        }
+    }
+    fn _clear(&self) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => {
+                unsafe {
+                    (*val).gtclr.write(|w| w.bits(1 << T::CHANNEL));
+                };
+            }
+            TimerRegBlock::Block16(val) => {
+                unsafe {
+                    (*val).gtclr.write(|w| w.bits(1 << T::CHANNEL));
+                };
+            }
+        }
+    }
+    fn _has_overflowed(&self) -> bool {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => unsafe { (*val).gtst.read().tcfpo().bit_is_set() },
+            TimerRegBlock::Block16(val) => unsafe { (*val).gtst.read().tcfpo().bit_is_set() },
+        }
+    }
+    fn _clear_overflow_flag(&self) {
+        match T::BLOCK {
+            TimerRegBlock::Block32(val) => unsafe {
+                (*val).gtst.modify(|_, w| w.tcfpo().clear_bit());
+            },
+            TimerRegBlock::Block16(val) => unsafe {
+                (*val).gtst.modify(|_, w| w.tcfpo().clear_bit());
+            },
+        }
+    }
+
+    fn set_frequency(&self, freq_hz: f32) -> Result<(), TimerError> {
+        let max_count: <T::Width as TimerSize>::CounterType = <T::Width>::max_value();
+
+        if freq_hz <= 0.0 || freq_hz > MCU_FREQ as f32 {
+            return Err(TimerError::InvalidFrequencySetting);
+        }
+
+        self.set_period_counts(freq_hz, max_count)
+    }
+
+    fn set_period_counts(
+        &self,
+        freq_hz: f32,
+        max: <T::Width as TimerSize>::CounterType,
+    ) -> Result<(), TimerError> {
+        let period_counts: u32;
+        let prescaler: Prescaler;
+        let target_counts: f32 = MCU_FREQ as f32 / freq_hz;
+
+        if (target_counts as u32) < max.into() {
+            period_counts = target_counts as u32;
+            prescaler = Prescaler::PCLKD_1;
+        } else if ((target_counts / 4.0) as u32) < max.into() {
+            period_counts = (target_counts / 4.0) as u32;
+            prescaler = Prescaler::PCLKD_4;
+        } else if ((target_counts / 16.0) as u32) < max.into() {
+            period_counts = (target_counts / 16.0) as u32;
+            prescaler = Prescaler::PCLKD_16;
+        } else if ((target_counts / 256.0) as u32) < max.into() {
+            period_counts = (target_counts / 256.0) as u32;
+            prescaler = Prescaler::PCLKD_256;
+        } else if ((target_counts / 1024.0) as u32) < max.into() {
+            period_counts = (target_counts / 1024.0) as u32;
+            prescaler = Prescaler::PCLKD_1024;
+        } else {
+            return Err(TimerError::InvalidFrequencySetting);
+        }
+
+        self._set_period_count(period_counts);
+        self._set_prescaler(prescaler);
+
+        Ok(())
+    }
+}
+impl<T: TimerInstance> GPTimer<T, Unconfigured, NotSet> {
+    /// Set mode to periodic and change typstate.
+    pub fn into_periodic(self) -> GPTimer<T, Unconfigured, Periodic> {
+        // Set mode to periodic before passing over
+        self._set_periodic_mode(TimerMode::PERIODIC);
+        GPTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+    /// Set mode to PWM triangle and change typestate
+    pub fn into_pwm(self) -> GPTimer<T, Unconfigured, Pwm> {
+        self._set_pwm_mode(PwmMode::TRIANGLE_WAVE_SYMMETRIC_PWM);
+        GPTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+}
+
+// Do we want to pass some sort of cfg struct?
+pub struct PeriodicCfg {
+    pub gtssr: GPTSourceT,
+    pub gtpsr: GPTSourceT,
+    pub gtcsr: GPTSourceT,
+    pub count_dir: CountDir,
+    /// This should be "reasonable" for the board for now
+    pub freq_hz: f32,
+}
+
+impl<T: TimerInstance> GPTimer<T, Unconfigured, Periodic> {
+    pub fn configure(self, cfg: PeriodicCfg) -> GPTimer<T, Configured, Periodic> {
+        self._set_count_dir(cfg.count_dir);
+        self._set_gtssr(cfg.gtssr);
+        self._set_gtpsr(cfg.gtpsr);
+        self._set_gtcsr(cfg.gtcsr);
+        // TODO: Handle this error instead of unwrapping.
+        self.set_frequency(cfg.freq_hz).unwrap();
+        GPTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+}
+
+impl<T: TimerInstance, MODE> GPTimer<T, Configured, MODE> {
+    pub fn start(&self) {
+        self._start();
+    }
+    pub fn stop(&self) {
+        self._stop();
+    }
+    pub fn clear(&self) {
+        self._clear();
+    }
+
+    /// Check the TCPFO flag on the register to see if we've overflowed
+    pub fn has_overflowed(&self) -> bool {
+        self._has_overflowed()
+    }
+    pub fn clear_overflow_flag(&self) {
+        self._clear_overflow_flag();
+    }
+
+    /// Release the timer by stopping, clearing, and returning to an unconfigured
+    /// state.
+    /// TODO: Run a full reset of all registers before releasing
+    /// Should this be a drop?
+    pub fn release(self) -> GPTimer<T, Unconfigured, NotSet> {
+        self.stop();
+        self.clear();
+        GPTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+            _mode: PhantomData,
+        }
+    }
+}
+
+/// Errors maybe?
+#[derive(Debug)]
+pub enum TimerError {
+    NoTimersAvailable,
+    TimerChannelNotClaimed,
+    TimerAlreadyRunning,
+    InvalidFrequencySetting,
+}
+
+/// Sources can be used to start the timer, stop the timer, count up, or count down.
+/// These enumerations represent a bitmask. Multiple sources can be ORed together.
+/// We will almost exclusively be using the Software start on bit 31.
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -20,14 +540,6 @@ pub enum GPTSourceT {
     GTETRGB_RISING = (1 << 2),
     // Action performed on GTETRGB falling edge.
     GTETRGB_FALLING = (1 << 3),
-    // // Action performed on GTETRGC rising edge.
-    // GTETRGC_RISING = (1 << 4),
-    // // Action performed on GTETRGC falling edge.
-    // GTETRGC_FALLING = (1 << 5),
-    // // Action performed on GTETRGB rising edge.
-    // GTETRGD_RISING = (1 << 6),
-    // // Action performed on GTETRGB falling edge.
-    // GTETRGD_FALLING = (1 << 7),
     // Action performed when GTIOCA input rises while GTIOCB is low.
     GTIOCA_RISING_WHILE_GTIOCB_LOW = (1 << 8),
     // Action performed when GTIOCA input rises while GTIOCB is high.
@@ -63,374 +575,4 @@ pub enum GPTSourceT {
     // Action performed on Software Source event.
     // Enables the GTSTR, GTSTP, and GTCLR registers when used appropriately
     SOFTWARE = (1 << 31),
-}
-
-#[allow(non_camel_case_types)]
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum TimerT {
-    GPT_16_Timer,
-    GPT_32_Timer,
-    // TODO: add AGT timers
-}
-
-#[allow(non_camel_case_types)]
-#[repr(u8)]
-pub enum TimerPrescalerSelect {
-    PCLKD_1 = 0,
-    PCLKD_4 = 1,
-    PCLKD_16 = 2,
-    PCLKD_64 = 3,
-    PCLKD_256 = 4,
-    PCLKD_1024 = 5,
-}
-
-#[allow(non_camel_case_types)]
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum TimerModeT {
-    /// Timer restarts after period elapses.
-    PERIODIC = 0,
-    /// Timer stops after period elapses.
-    ONE_SHOT = 1,
-    // /// Timer generates saw-wave PWM output.
-    // PWM = 2,
-    // /// Saw-wave one-shot pulse mode (fixed buffer operation).
-    // ONE_SHOT_PULSE = 3,
-    /// Timer generates symmetric triangle-wave PWM output.
-    TRIANGLE_WAVE_SYMMETRIC_PWM = 4,
-    /// Timer generates asymmetric triangle-wave PWM output.
-    TRIANGLE_WAVE_ASYMMETRIC_PWM = 5,
-    /// Timer generates Asymmetric Triangle-wave PWM output. In PWM mode 3, the duty cycle does
-    ///not need to be updated at each tough/crest interrupt. Instead, the trough and crest duty cycle values can be
-    /// set once and only need to be updated when the application needs to change the duty cycle.
-    TRIANGLE_WAVE_ASYMMETRIC_PWM_mODE3 = 6,
-}
-
-/// Enable the GPT 32bit and 16bit timers
-pub fn enable_gptimers() {
-    let gpt_stopreg = ra4m1::MSTP::PTR;
-    // Enable gpt_16 & gpt_32
-    unsafe {
-        (*gpt_stopreg)
-            .mstpcrd
-            .modify(|r, w| w.bits(r.bits() & !(0b11 << 5)));
-    }
-}
-
-/// Board-specific constants
-pub const GPT_HOWMANY: usize = 8;
-pub const GPT_32_HOWMANY: usize = 2;
-pub const GPT_16_HOWMANY: usize = 6;
-
-#[derive(Debug)]
-pub struct TimerChannel(u8);
-
-/// First 2 bits are 32 bit timers, next 6 are for 16 bit timers.
-static GPT_USED_CHANNEL: AtomicU8 = AtomicU8::new(0);
-
-#[derive(Debug)]
-pub enum TimerError {
-    NoTimersAvailable,
-    TimerChannelNotClaimed,
-    TimerAlreadyRunning,
-    InvalidFrequencySetting,
-}
-
-/// I might need a better way to do this, for safety do not mutate the resulting
-/// TimerChannel you get returned from this instance. I might want to move this
-/// logic to the timer creation field but then what happens if it fails to create
-/// a timer?
-pub fn claim_timer(timertype: &TimerT) -> Result<TimerChannel, TimerError> {
-    // Get our range depending on our timer type
-    let (lower, upper) = match timertype {
-        TimerT::GPT_32_Timer => (0, GPT_32_HOWMANY),
-        TimerT::GPT_16_Timer => (GPT_32_HOWMANY, GPT_HOWMANY),
-    };
-
-    loop {
-        let current_val = GPT_USED_CHANNEL.load(Ordering::Acquire);
-
-        if (current_val == 0b11 && *timertype == TimerT::GPT_32_Timer)
-            || (current_val >= 0b11111100 && *timertype == TimerT::GPT_16_Timer)
-        {
-            return Err(TimerError::NoTimersAvailable);
-        }
-
-        // Find the first available timer within that range (0 bit)
-        for channel in lower..upper {
-            let bit = 1 << channel;
-            // Open timer at this shift
-            if current_val & bit == 0 {
-                let new_value = current_val | bit;
-                // This bit is from the docs and I don't really get it
-                if GPT_USED_CHANNEL
-                    .compare_exchange(current_val, new_value, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return Ok(TimerChannel(channel.try_into().unwrap()));
-                }
-            }
-        }
-    }
-}
-
-fn release_timer(channel: TimerChannel) {
-    let bit = 1 << channel.0;
-    GPT_USED_CHANNEL.fetch_and(!bit, Ordering::Release);
-}
-
-// Not sure if I need these or if these should be connected to the specific timer.
-// Some sort of big ol' match statement?
-const GPT_32_PTRS: [*const ra4m1::gpt320::RegisterBlock; 2] =
-    [ra4m1::GPT320::PTR, ra4m1::GPT321::PTR];
-
-const GPT_16_PTRS: [*const ra4m1::gpt162::RegisterBlock; 6] = [
-    ra4m1::GPT162::PTR,
-    ra4m1::GPT163::PTR,
-    ra4m1::GPT164::PTR,
-    ra4m1::GPT165::PTR,
-    ra4m1::GPT166::PTR,
-    ra4m1::GPT167::PTR,
-];
-
-enum GPTRegBlockPtr {
-    GPT32RegBlock(*const ra4m1::gpt320::RegisterBlock),
-    GPT16RegBlock(*const ra4m1::gpt162::RegisterBlock),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum CountDir {
-    Up,
-    Down,
-}
-
-/// Build a timer config to pass into a GPTimer instance.
-#[derive(Debug, Clone, Copy)]
-pub struct TimerCfg {
-    pub timer_type: TimerT,
-    pub count_direction: CountDir,
-    pub gtssr: GPTSourceT,
-    pub gtpsr: GPTSourceT,
-    pub gtcsr: GPTSourceT,
-    pub mode: TimerModeT,
-    pub freq: u32, // Do I need a check to make a reasonable frequency?
-}
-
-// What does a timer need to function?
-pub struct GPTimer {
-    timer_type: TimerT,
-    duty_cycle_pct: f32,
-    period_counts: u32, // Limited to u16 on 16 bit timers
-    mode: TimerModeT,
-    prescaler: TimerPrescalerSelect,
-    channel: TimerChannel,
-    count_direction: CountDir,
-    // GPTimer specific settings to be extended later, this part will be different for AGTimers?
-    gtssr: GPTSourceT,
-    gtpsr: GPTSourceT,
-    gtcsr: GPTSourceT,
-    count_up_source: Option<GPTSourceT>,
-    count_down_source: Option<GPTSourceT>,
-    enable_buffering: bool,
-    reg_block_ptr: GPTRegBlockPtr,
-    // Some stuff to track timer state
-    is_running: bool,
-    is_stopped: bool,
-}
-impl GPTimer {
-    /// Instantiates a new timer from a config and a channel. Takes ownership of
-    /// the channel. Should this be allowed to fail? Maybe? Technically if we
-    /// have an open channel there's no way this should ever fail.
-    pub fn new_from_config(cfg: TimerCfg, channel: TimerChannel) -> Self {
-        let reg_ptr = match &cfg.timer_type {
-            TimerT::GPT_16_Timer => {
-                GPTRegBlockPtr::GPT16RegBlock(GPT_16_PTRS[(channel.0 - 2) as usize])
-            }
-            TimerT::GPT_32_Timer => GPTRegBlockPtr::GPT32RegBlock(GPT_32_PTRS[channel.0 as usize]),
-        };
-        let mut timer = GPTimer {
-            timer_type: cfg.timer_type,
-            duty_cycle_pct: 0.50,
-            period_counts: 0,
-            mode: cfg.mode,
-            prescaler: TimerPrescalerSelect::PCLKD_1,
-            channel,
-            count_direction: cfg.count_direction,
-            gtssr: cfg.gtssr,
-            gtpsr: cfg.gtpsr,
-            gtcsr: cfg.gtcsr,
-            count_up_source: None,
-            count_down_source: None,
-            enable_buffering: true,
-            reg_block_ptr: reg_ptr,
-            is_running: false,
-            is_stopped: true,
-        };
-        timer.set_count_dir();
-        timer.set_count(0);
-        timer
-    }
-    fn set_count_dir(&mut self) {
-        let gpt_block_ptr = &self.reg_block_ptr;
-        match gpt_block_ptr {
-            GPTRegBlockPtr::GPT32RegBlock(ptr) => unsafe {
-                (**ptr).gtuddtyc.modify(|r, w| w.bits(r.bits() | 1));
-            },
-            GPTRegBlockPtr::GPT16RegBlock(ptr) => unsafe {
-                (**ptr).gtuddtyc.modify(|r, w| w.bits(r.bits() | 1));
-            },
-        }
-    }
-    /// Start the timer count
-    pub fn start(&mut self) -> Result<(), TimerError> {
-        if self.is_running {
-            return Err(TimerError::TimerAlreadyRunning);
-        }
-        if self.gtssr == GPTSourceT::SOFTWARE {
-            let gpt_block_ptr = &self.reg_block_ptr;
-            match gpt_block_ptr {
-                GPTRegBlockPtr::GPT32RegBlock(ptr) => unsafe {
-                    (**ptr)
-                        .gtstr
-                        .modify(|r, w| w.bits(r.bits() | 1 << &self.channel.0));
-                },
-                GPTRegBlockPtr::GPT16RegBlock(ptr) => unsafe {
-                    (**ptr)
-                        .gtstr
-                        .modify(|r, w| w.bits(r.bits() | 1 << &self.channel.0));
-                },
-            }
-            self.is_running = true;
-            self.is_stopped = false;
-            Ok(())
-        } else {
-            defmt::todo!(" Only Software GTSSR supported for now")
-        }
-    }
-    /// Stop the timer if it's running
-    pub fn stop(&mut self) {
-        if self.is_stopped {
-            return;
-        }
-        // TODO: Lol this only works if the gtpsr source is GPT_SOURCE_SOFTWARE
-        if self.gtpsr == GPTSourceT::SOFTWARE {
-            let gpt_block_ptr = &self.reg_block_ptr;
-            match gpt_block_ptr {
-                GPTRegBlockPtr::GPT32RegBlock(ptr) => unsafe {
-                    (**ptr)
-                        .gtstp
-                        .modify(|r, w| w.bits(r.bits() | 1 << &self.channel.0));
-                },
-                GPTRegBlockPtr::GPT16RegBlock(ptr) => unsafe {
-                    (**ptr)
-                        .gtstp
-                        .modify(|r, w| w.bits(r.bits() | 1 << &self.channel.0));
-                },
-            }
-            self.is_running = false;
-            self.is_stopped = true;
-        } else {
-            defmt::todo!("Only Software GTPSR support for now")
-        }
-    }
-    pub fn clear(&mut self) -> Result<(), TimerError> {
-        // Timer must be stopped before it can be cleared
-        if self.is_running() {
-            return Err(TimerError::TimerAlreadyRunning);
-        }
-        self.set_count(0);
-        Ok(())
-    }
-    pub fn is_stopped(&self) -> bool {
-        self.is_stopped
-    }
-    pub fn is_running(&self) -> bool {
-        self.is_running
-    }
-    pub fn get_timer_type(&self) -> TimerT {
-        self.timer_type
-    }
-    pub fn set_frequency(&mut self, freq_hz: f32) -> Result<(), TimerError> {
-        let max_count = match self.timer_type {
-            TimerT::GPT_16_Timer => u16::MAX as u32,
-            TimerT::GPT_32_Timer => u32::MAX,
-        };
-        // This also should fail if freq_hz is "too small" as really anything
-        // slower than a couple of seconds isn't valid for the GPT clocks
-        // Really slow stuff needs the AGT or some more complex chained overflows.
-        if freq_hz <= 0.0 {
-            return Err(TimerError::InvalidFrequencySetting);
-        }
-        self.set_period_counts(freq_hz, max_count)
-    }
-    fn set_period_counts(&mut self, period: f32, max: u32) -> Result<(), TimerError> {
-        // TODO: This should be read from somewhere (chip? Global?) Not hardcoded.
-        let base_freq_hz = 48_000_000; // 48Mhz base oscillator
-        if period * base_freq_hz as f32 > max as f32 {
-            self.period_counts = (period * base_freq_hz as f32) as u32;
-            self.prescaler = TimerPrescalerSelect::PCLKD_1;
-        } else if period * base_freq_hz as f32 / 4.0 > max as f32 {
-            self.period_counts = (period * base_freq_hz as f32 / 4.0) as u32;
-            self.prescaler = TimerPrescalerSelect::PCLKD_4;
-        } else if period * base_freq_hz as f32 / 16.0 > max as f32 {
-            self.period_counts = (period * base_freq_hz as f32 / 16.0) as u32;
-            self.prescaler = TimerPrescalerSelect::PCLKD_16;
-        } else if period * base_freq_hz as f32 / 256.0 > max as f32 {
-            self.period_counts = (period * base_freq_hz as f32 / 256.0) as u32;
-            self.prescaler = TimerPrescalerSelect::PCLKD_256;
-        } else if period * base_freq_hz as f32 / 1024.0 > max as f32 {
-            self.period_counts = (period * base_freq_hz as f32 / 1024.0) as u32;
-            self.prescaler = TimerPrescalerSelect::PCLKD_1024;
-        } else {
-            return Err(TimerError::InvalidFrequencySetting);
-        }
-        Ok(())
-    }
-
-    /// If you try to set a 32 bit value for a 16 bit timer, data will be silently lost
-    /// Unsafe, don't write dumb stuff to the count register. Timer must be stopped to set count
-    pub fn set_count(&mut self, counts: u32) {
-        // Since this is a pub function, I need a guard so we don't write to in-use registers
-        // I don't want to return a result since this also runs in the Drop trait.
-        match self.timer_type {
-            TimerT::GPT_32_Timer => self.set_count_32(counts),
-            TimerT::GPT_16_Timer => self.set_count_16(counts as u16), // this loses data
-        }
-    }
-    fn set_count_32(&mut self, counts: u32) {
-        let gpt_block_ptr = &self.reg_block_ptr;
-        match gpt_block_ptr {
-            GPTRegBlockPtr::GPT32RegBlock(ptr) => unsafe {
-                (**ptr).gtcnt.write(|w| w.gtcnt().bits(counts));
-            },
-            GPTRegBlockPtr::GPT16RegBlock(_) => {
-                defmt::unreachable!("Can't have a 16 bit reg block on a 32 bit timer")
-            }
-        }
-    }
-    fn set_count_16(&mut self, counts: u16) {
-        let gpt_block_ptr = &self.reg_block_ptr;
-        match gpt_block_ptr {
-            GPTRegBlockPtr::GPT32RegBlock(_) => {
-                defmt::unreachable!("Can't have a 32 bit reg block on a 16 bit timer")
-            }
-            GPTRegBlockPtr::GPT16RegBlock(ptr) => unsafe {
-                (**ptr).gtcnt.write(|w| w.gtcnt().bits(counts as u32));
-            },
-        }
-    }
-}
-
-/// I'm not sure if this is the best way to do a destructor. I'm trying to follow
-/// RAII principles where this timer can only exist if you have a valid channel.
-/// You can have as many timer configs as you want but if you claim a timer you
-/// have ownership of that timer until it goes out of scope.
-impl Drop for GPTimer {
-    fn drop(&mut self) {
-        self.stop();
-        // Don't use clear b/c we want no errors in our drop code?
-        self.set_count(0);
-        let bit = 1 << self.channel.0;
-        GPT_USED_CHANNEL.fetch_and(!bit, Ordering::Release);
-    }
 }

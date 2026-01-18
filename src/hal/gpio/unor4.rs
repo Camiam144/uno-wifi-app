@@ -39,8 +39,6 @@ pub mod port1 {
         pub p111: P111<Input>,
         pub p112: P112<Input>,
         pub p113: P113<Input>,
-        pub p114: P114<Input>,
-        pub p115: P115<Input>,
     }
 
     impl GpioExt for crate::pac::PORT1 {
@@ -65,8 +63,6 @@ pub mod port1 {
                 p111: P111::new(unsafe { (*PMNPFS_BLOCK_BASE).p111pfs() }),
                 p112: P112::new(unsafe { (*PMNPFS_BLOCK_BASE).p112pfs() }),
                 p113: P113::new(unsafe { (*PMNPFS_BLOCK_BASE).p113pfs() }),
-                p114: P114::new(unsafe { (*PMNPFS_BLOCK_BASE).p114pfs() }),
-                p115: P115::new(unsafe { (*PMNPFS_BLOCK_BASE).p115pfs() }),
             }
         }
     }
@@ -84,8 +80,6 @@ pub mod port1 {
     pub type P111<Input> = Pin<1, 11, Input>;
     pub type P112<Input> = Pin<1, 12, Input>;
     pub type P113<Input> = Pin<1, 13, Input>;
-    pub type P114<Input> = Pin<1, 14, Input>;
-    pub type P115<Input> = Pin<1, 15, Input>;
 }
 
 // Still need to implement the input only ports on Port 2
@@ -118,3 +112,45 @@ gpio_port!(
         (P304, p304, 4, p304pfs),
     ]
 );
+
+pub mod port4 {
+    use crate::hal::gpio::*;
+    pub struct Port4;
+
+    pub struct Parts {
+        pub p400: P400<Input>,
+        pub p401: P401<Input>,
+        pub p402: P402<Input>,
+        pub p407: P407<Input>,
+        // pub p408: P408<Input>,
+        pub p409: P409<Input>,
+        pub p410: P410<Input>,
+        pub p411: P411<Input>,
+    }
+
+    impl GpioExt for crate::pac::PORT4 {
+        type Parts = Parts;
+
+        fn split(self) -> Parts {
+            Parts {
+                p400: P400::new(unsafe { (*PMNPFS_BLOCK_BASE).p400pfs().get_unchecked(0) }),
+                p401: P401::new(unsafe { (*PMNPFS_BLOCK_BASE).p400pfs().get_unchecked(1) }),
+                p402: P402::new(unsafe { (*PMNPFS_BLOCK_BASE).p400pfs().get_unchecked(2) }),
+                p407: P407::new(unsafe { (*PMNPFS_BLOCK_BASE).p400pfs().get_unchecked(7) }),
+                // type is p408
+                // p408: P408::new(unsafe { (*PMNPFS_BLOCK_BASE).p408pfs() }),
+                p409: P409::new(unsafe { (*PMNPFS_BLOCK_BASE).p409pfs() }),
+                p410: P410::new(unsafe { (*PMNPFS_BLOCK_BASE).p410pfs() }),
+                p411: P411::new(unsafe { (*PMNPFS_BLOCK_BASE).p411pfs() }),
+            }
+        }
+    }
+    pub type P400<Input> = Pin<4, 0, Input>;
+    pub type P401<Input> = Pin<4, 1, Input>;
+    pub type P402<Input> = Pin<4, 2, Input>;
+    pub type P407<Input> = Pin<4, 7, Input>;
+    // pub type P408<Input> = Pin<4, 8, Input>;
+    pub type P409<Input> = Pin<4, 9, Input>;
+    pub type P410<Input> = Pin<4, 10, Input>;
+    pub type P411<Input> = Pin<4, 11, Input>;
+}

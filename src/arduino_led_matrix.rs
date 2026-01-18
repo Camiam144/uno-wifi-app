@@ -1,9 +1,6 @@
+use crate::hal::gpio::Input;
 use crate::hal::gpio::Pin;
 use crate::hal::gpio::erased::DynamicPinErased;
-use crate::hal::{
-    gpio::Input,
-    timer::{CountDir, GPTSourceT, GPTimer, TimerCfg, TimerError, TimerModeT, TimerT, claim_timer},
-};
 use core::ptr;
 
 // TODO: Figure out the graphics library
@@ -125,7 +122,6 @@ pub struct ArduinoLEDMatrix {
     framebuffer: [u32; 3],
     // The timer shouldn't be optional, this struct should own a timer.
     // Either it gets one during init or the programmer gets one and passes it in.
-    led_timer: Option<GPTimer>,
 }
 
 const LEDPORT0BITMASK: u16 = (1 << 3) | (1 << 4) | (1 << 11) | (1 << 12) | (1 << 13) | (1 << 15);
@@ -179,29 +175,7 @@ impl ArduinoLEDMatrix {
         Self {
             dynpins,
             framebuffer: [0, 0, 0],
-            led_timer: None,
         }
-    }
-
-    /// Handles the logic to set up a timer and the ISR callback
-    pub fn begin(&mut self) -> Result<(), TimerError> {
-        // TODO: Write the interrupt and callback
-        let timer_cfg = TimerCfg {
-            timer_type: TimerT::GPT_16_Timer,
-            count_direction: CountDir::Up,
-            gtssr: GPTSourceT::SOFTWARE,
-            gtpsr: GPTSourceT::SOFTWARE,
-            gtcsr: GPTSourceT::SOFTWARE,
-            mode: TimerModeT::PERIODIC,
-            freq: 10000,
-        };
-        let channel = claim_timer(&timer_cfg.timer_type)?;
-        let led_timer = GPTimer::new_from_config(timer_cfg, channel);
-        self.led_timer = Some(led_timer);
-        // TODO: Hook up the interrupt
-        self.led_timer.as_mut().unwrap().set_frequency(10000.0)?;
-        self.led_timer.as_mut().unwrap().start()?;
-        Ok(())
     }
 
     pub fn on(&mut self, led_idx: usize) {

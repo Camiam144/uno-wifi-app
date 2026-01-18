@@ -3,17 +3,17 @@ use crate::hal::timer::{self};
 
 /// Enable the GPT 32 and 16 timers
 pub fn enable_gptimers() {
-    let gpt_stopreg = ra4m1::MSTP::PTR;
-    defmt::println!("enabling mstpcrd in the MSTP");
+    let gpt_stopreg = crate::pac::MSTP::PTR;
+    // defmt::println!("enabling mstpcrd in the MSTP");
     // Enable gpt_16 & gpt_32
     unsafe {
         (*gpt_stopreg)
             .mstpcrd
             .modify(|r, w| w.bits(r.bits() & !(0b11 << 5)));
     }
-    let reg_val = unsafe { (*gpt_stopreg).mstpcrd.read().bits() };
-    defmt::println!("mstpcrd value, bits 5 & 6 should be 0");
-    defmt::println!("0b{:032b}", reg_val);
+    // let reg_val = unsafe { (*gpt_stopreg).mstpcrd.read().bits() };
+    // defmt::println!("mstpcrd value, bits 5 & 6 should be 0");
+    // defmt::println!("0b{:032b}", reg_val);
 }
 
 // You can clearly write more than 1 bit at a time if needed in one operation
@@ -21,7 +21,7 @@ pub fn enable_gptimers() {
 pub fn start_timer(ch: u8) {
     defmt::assert!(ch <= 7, "Channel must be between 0 and 7, got {}", ch);
     // All timers share the same GTSTR GTSTP and GTCLR registers?
-    let gtstr = ra4m1::GPT164::PTR;
+    let gtstr = crate::pac::GPT164::PTR;
     unsafe {
         (*gtstr).gtstr.modify(|r, w| w.bits(r.bits() | 1 << ch));
     }
@@ -37,7 +37,7 @@ pub fn start_timer(ch: u8) {
 pub fn stop_timer(ch: u8) {
     defmt::assert!(ch <= 7, "Channel must be between 0 and 7, got {}", ch);
     // All timers share the same GTSTR and GTSTP registers
-    let gtstp = ra4m1::GPT164::PTR;
+    let gtstp = crate::pac::GPT164::PTR;
     unsafe {
         (*gtstp).gtstp.modify(|r, w| w.bits(r.bits() | 1 << ch));
     }
@@ -50,19 +50,19 @@ pub fn stop_timer(ch: u8) {
     defmt::println!("0b{:032b}", regval);
 }
 
-pub fn get_reg_block_for_gpt16(ch: u8) -> *const ra4m1::gpt162::RegisterBlock {
+pub fn get_reg_block_for_gpt16(ch: u8) -> *const crate::pac::gpt162::RegisterBlock {
     defmt::assert!(
         (2..=7).contains(&ch),
         "gpt 16 timer channel must be between 2 and 7"
     );
 
     match ch {
-        2 => ra4m1::GPT162::PTR,
-        3 => ra4m1::GPT163::PTR,
-        4 => ra4m1::GPT164::PTR,
-        5 => ra4m1::GPT165::PTR,
-        6 => ra4m1::GPT166::PTR,
-        7 => ra4m1::GPT167::PTR,
+        2 => crate::pac::GPT162::PTR,
+        3 => crate::pac::GPT163::PTR,
+        4 => crate::pac::GPT164::PTR,
+        5 => crate::pac::GPT165::PTR,
+        6 => crate::pac::GPT166::PTR,
+        7 => crate::pac::GPT167::PTR,
         _ => unreachable!(),
     }
 }
@@ -95,9 +95,9 @@ pub fn get_timer() {
         // Set timer to periodic sawtooth and prescaler to 1024
         (*reg_ptr).gtcr.write(|w| {
             w.md()
-                .bits(timer::TimerModeT::PERIODIC as u8)
+                .bits(timer::TimerMode::PERIODIC as u8)
                 .tpcs()
-                .bits(timer::TimerPrescalerSelect::PCLKD_4 as u8)
+                .bits(timer::Prescaler::PCLKD_4 as u8)
         });
         // More magic numbers "set for overall period" on gtpbr
         (*reg_ptr).gtpr.write(|w| w.gtpr().bits(1250));
