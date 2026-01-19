@@ -172,6 +172,10 @@ impl ArduinoLEDMatrix {
             p212.into_fully_erased_dynamic(),
             p213.into_fully_erased_dynamic(),
         ];
+
+        // When we start up a board, also set up the interrupt.
+        // TODO: There's gotta be a cleaner way to do this. What if this interrupt
+        // is already in use?
         Self {
             dynpins,
             framebuffer: [0, 0, 0],

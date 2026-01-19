@@ -19,6 +19,19 @@ pub unsafe fn enable_gptimers() {
     }
 }
 
+/// Enable the AGT 16bit timers
+///
+/// # Safety
+///
+/// Don't write to this register if timers are already running I think?
+/// Also don't use this function if you're already writing to it somewhere else
+pub unsafe fn enable_agtimers() {
+    let p = unsafe { ra4m1::Peripherals::steal() };
+    p.MSTP
+        .mstpcrd
+        .modify(|_, w| w.mstpd2().clear_bit().mstpd3().clear_bit());
+}
+
 #[allow(non_camel_case_types)]
 #[repr(u8)]
 pub enum Prescaler {
@@ -190,7 +203,12 @@ gptimer!(GPT167, Gpt7, Bits16, Block16, 7);
 // THis should be read from somewhere
 const MCU_FREQ: u32 = 48_000_000;
 
-/// Generic timer struct
+/// Generic General Purpose timer struct
+///
+/// - `T` is the Timer Instance, this holds some associated data such as the
+///   register block, the timer channel, and the timer width in bits.
+/// - `CFG` is the configuration status, timers can only run if they're configured
+/// - `MODE` is a timer mode (PWM vs Periodic) maybe also One Shot?
 pub struct GPTimer<T: TimerInstance, CFG, MODE> {
     _instance: PhantomData<T>,
     _cfg: PhantomData<CFG>,
@@ -502,7 +520,7 @@ impl<T: TimerInstance, MODE> GPTimer<T, Configured, MODE> {
     /// Release the timer by stopping, clearing, and returning to an unconfigured
     /// state.
     /// TODO: Run a full reset of all registers before releasing
-    /// Should this be a drop?
+    /// Should this be a drop? Or is returning an unconfigured not set timer enough?
     pub fn release(self) -> GPTimer<T, Unconfigured, NotSet> {
         self.stop();
         self.clear();
@@ -517,9 +535,6 @@ impl<T: TimerInstance, MODE> GPTimer<T, Configured, MODE> {
 /// Errors maybe?
 #[derive(Debug)]
 pub enum TimerError {
-    NoTimersAvailable,
-    TimerChannelNotClaimed,
-    TimerAlreadyRunning,
     InvalidFrequencySetting,
 }
 
@@ -575,4 +590,169 @@ pub enum GPTSourceT {
     // Action performed on Software Source event.
     // Enables the GTSTR, GTSTP, and GTCLR registers when used appropriately
     SOFTWARE = (1 << 31),
+}
+
+// =====================================
+//              AGTimer Stuff
+// =====================================
+
+#[allow(non_camel_case_types)]
+#[repr(u8)]
+pub enum AGTPrescaler {
+    PCLKD_1 = 0,
+    PCLKD_8 = 1,
+    PCLKD_2 = 3,
+    Divided_AGTLCLK = 4,
+    Underflow_AGT0 = 5,
+    Divided_AGTSCLK = 6,
+}
+
+pub struct AGTimer0;
+pub struct AGTimer1;
+
+pub trait AGTimerInstance {
+    type Width: TimerSize;
+    const CHANNEL: u8;
+    const BLOCK: *const ra4m1::agt0::RegisterBlock;
+}
+// Only 2 timers so we'll just copy-paste instead of macroing.
+// Ideally (maybe) the AGTimers could be just another timer type, it does add
+// another arm to the match enum.
+impl AGTimerInstance for AGTimer0 {
+    type Width = Bits16;
+    const CHANNEL: u8 = 0;
+    const BLOCK: *const ra4m1::agt0::RegisterBlock = ra4m1::AGT0::PTR;
+}
+impl AGTimerInstance for AGTimer1 {
+    type Width = Bits16;
+    const CHANNEL: u8 = 1;
+    const BLOCK: *const ra4m1::agt0::RegisterBlock = ra4m1::AGT1::PTR;
+}
+
+impl TimerExt for crate::pac::AGT0 {
+    type Timer = AGTimer<AGTimer0, Unconfigured>;
+    fn into_timer(self) -> AGTimer<AGTimer0, Unconfigured> {
+        AGTimer::<AGTimer0, Unconfigured>::new()
+    }
+}
+impl TimerExt for crate::pac::AGT1 {
+    type Timer = AGTimer<AGTimer1, Unconfigured>;
+    fn into_timer(self) -> AGTimer<AGTimer1, Unconfigured> {
+        AGTimer::<AGTimer1, Unconfigured>::new()
+    }
+}
+
+/// AGT timer struct
+/// We will use AGT timer 0 for the system timer function much like the arduino
+/// built-in software
+///
+/// This follows a lot of the same conventions as the GPT timer stuff, but
+/// adapted for AGT.
+pub struct AGTimer<T: AGTimerInstance, CFG> {
+    _instance: PhantomData<T>,
+    _cfg: PhantomData<CFG>,
+}
+
+#[allow(clippy::new_without_default)]
+impl<T: AGTimerInstance, CFG> AGTimer<T, CFG> {
+    pub fn new() -> Self {
+        Self {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+        }
+    }
+    // fn _set_periodic_mode(&self) {
+    //     unsafe {
+    //         (*T::BLOCK).agtmr1.modify(|_, w| w.tmod()._000());
+    //     }
+    // }
+
+    fn _set_period_count(&self, count: u16) {
+        // There is a bunch of timing stuff if you use the compare match registers
+        // and a certain number of clock cycles before registers are enabled
+        // or reloaded. Idk. Just don't mess it up.
+        unsafe {
+            (*T::BLOCK).agt.write(|w| w.agt().bits(count));
+        }
+    }
+    fn _set_prescaler(&self, prescaler: AGTPrescaler) {
+        unsafe {
+            (*T::BLOCK)
+                .agtmr1
+                .modify(|_, w| w.tck().bits(prescaler as u8));
+        }
+    }
+    fn _start(&self) {
+        unsafe {
+            (*T::BLOCK).agtcr.modify(|_, w| w.tstart().set_bit());
+        };
+    }
+    fn _stop(&self) {
+        unsafe {
+            (*T::BLOCK).agtcr.modify(|_, w| w.tstop().clear_bit());
+        };
+    }
+    fn _clear(&self) {
+        unsafe {
+            (*T::BLOCK).agt.write(|w| w.agt().bits(0xFFFF));
+        };
+    }
+
+    fn _has_underflowed(&self) -> bool {
+        unsafe { (*T::BLOCK).agtcr.read().tundf().bit_is_set() }
+    }
+    fn _clear_underflow_flag(&self) {
+        unsafe {
+            (*T::BLOCK).agtcr.modify(|_, w| w.tundf().clear_bit());
+        }
+    }
+}
+// Do we want to pass some sort of cfg struct?
+pub struct AGTCfg {
+    pub counts: u16,
+    pub prescaler: AGTPrescaler,
+}
+
+impl<T: AGTimerInstance> AGTimer<T, Unconfigured> {
+    pub fn configure(self, cfg: AGTCfg) -> AGTimer<T, Configured> {
+        self._set_period_count(cfg.counts);
+        self._set_prescaler(cfg.prescaler);
+        // self._set_periodic_mode();
+        AGTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+        }
+    }
+}
+
+impl<T: AGTimerInstance> AGTimer<T, Configured> {
+    pub fn start(&self) {
+        self._start();
+    }
+    pub fn stop(&self) {
+        self._stop();
+    }
+    pub fn clear(&self) {
+        self._clear();
+    }
+    /// Check the TCPFO flag on the register to see if we've overflowed
+    pub fn has_underflowed(&self) -> bool {
+        self._has_underflowed()
+    }
+    pub fn clear_underflow_flag(&self) {
+        self._clear_underflow_flag();
+    }
+
+    /// Release the timer by stopping, clearing, and returning to an unconfigured
+    /// state.
+    /// TODO: Run a full reset of all registers before releasing
+    /// Should this be a drop? Or is returning an unconfigured timer enough?
+    pub fn release(self) -> AGTimer<T, Unconfigured> {
+        self.stop();
+        self.clear();
+        AGTimer {
+            _instance: PhantomData,
+            _cfg: PhantomData,
+        }
+    }
 }

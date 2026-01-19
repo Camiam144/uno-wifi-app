@@ -1,3 +1,5 @@
+use crate::hal::gpio::Input;
+
 use super::{AnyPin, DynamicPinErased, Output, Pin, erased::PinModeError};
 use core::convert::Infallible;
 use embedded_hal::digital::{ErrorType, InputPin, OutputPin, StatefulOutputPin};
@@ -6,7 +8,7 @@ impl<const P: u8, const N: u8, MODE> ErrorType for Pin<P, N, MODE> {
     type Error = Infallible;
 }
 
-impl<const P: u8, const N: u8, MODE> InputPin for Pin<P, N, MODE> {
+impl<const P: u8, const N: u8> InputPin for Pin<P, N, Input> {
     #[inline(always)]
     fn is_high(&mut self) -> Result<bool, Self::Error> {
         Ok(Self::is_high(self))
