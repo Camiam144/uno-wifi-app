@@ -5,12 +5,12 @@ use core::cell::Cell;
 
 use cortex_m::interrupt::{Mutex, free};
 use ra4m1::interrupt;
-use uno_wifi_app::arduino_led_matrix::ArduinoLEDMatrix;
 use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
 use uno_wifi_app::hal::timer::{
     AGTCfg, AGTPrescaler, CountDir, GPTSourceT, PeriodicCfg, TimerExt, enable_agtimers,
     enable_gptimers,
 };
+use uno_wifi_app::led_matrix::LEDMatrix;
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
 
@@ -146,7 +146,7 @@ fn main() -> ! {
     let p213 = p2_pins.p213;
 
     // let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
-    let mut led_matrix = ArduinoLEDMatrix::new(
+    let mut led_matrix = LEDMatrix::new(
         p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213,
     );
     let heart: [u32; 3] = [

@@ -2,8 +2,8 @@
 #![no_std]
 
 use cortex_m::delay::Delay;
-use uno_wifi_app::arduino_led_matrix;
 use uno_wifi_app::hal::gpio::{Pin, PinMode, Port};
+use uno_wifi_app::led_matrix;
 use uno_wifi_app::{self as _, time::SYSCLK_FREQ}; // global logger + panicking-behavior + memory layout
 
 // mod delay;

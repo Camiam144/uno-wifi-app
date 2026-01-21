@@ -1,10 +1,10 @@
 #![no_main]
 #![no_std]
 
-pub mod arduino_led_matrix;
-pub mod delay;
+pub mod display_info;
 pub mod hal;
-pub mod time;
+pub mod interrupts;
+pub mod led_matrix;
 
 use defmt_rtt as _; // global logger
 

@@ -449,6 +449,10 @@ impl<T: TimerInstance, CFG, MODE> GPTimer<T, CFG, MODE> {
 
         Ok(())
     }
+
+    pub fn get_channel(&self) -> u8 {
+        T::CHANNEL
+    }
 }
 impl<T: TimerInstance> GPTimer<T, Unconfigured, NotSet> {
     /// Set mode to periodic and change typstate.
