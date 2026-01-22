@@ -7,7 +7,8 @@ use crate::hal::timer::GPTimer;
 use crate::hal::timer::NotSet;
 use crate::hal::timer::Periodic;
 use crate::hal::timer::{Configured, PeriodicCfg, TimerInstance, Unconfigured};
-use core::cell::Cell;
+use crate::millis_timer::millis;
+use core::cell::{Cell, RefCell};
 use cortex_m::interrupt::{Mutex, free};
 use ra4m1::interrupt;
 
@@ -19,7 +20,7 @@ pub const NUM_LEDS: u8 = 96;
 /// start at 0 in the top left. Each index is given as [HI, LO] to turn on that
 /// specific LED.
 const PINS: [[u8; 2]; 96] = [
-    [7, 3], // 0
+    [7, 3],
     [3, 7],
     [7, 4],
     [4, 7],
@@ -29,7 +30,7 @@ const PINS: [[u8; 2]; 96] = [
     [8, 7],
     [3, 8],
     [8, 3],
-    [4, 8], // 10
+    [4, 8],
     [8, 4],
     [7, 0],
     [0, 7],
@@ -39,7 +40,7 @@ const PINS: [[u8; 2]; 96] = [
     [0, 4],
     [8, 0],
     [0, 8],
-    [7, 6], // 20
+    [7, 6],
     [6, 7],
     [3, 6],
     [6, 3],
@@ -49,7 +50,7 @@ const PINS: [[u8; 2]; 96] = [
     [6, 8],
     [0, 6],
     [6, 0],
-    [7, 5], // 30
+    [7, 5],
     [5, 7],
     [3, 5],
     [5, 3],
@@ -59,7 +60,7 @@ const PINS: [[u8; 2]; 96] = [
     [5, 8],
     [0, 5],
     [5, 0],
-    [6, 5], // 40
+    [6, 5],
     [5, 6],
     [7, 1],
     [1, 7],
@@ -69,7 +70,7 @@ const PINS: [[u8; 2]; 96] = [
     [1, 4],
     [8, 1],
     [1, 8],
-    [0, 1], // 50
+    [0, 1],
     [1, 0],
     [6, 1],
     [1, 6],
@@ -121,7 +122,8 @@ const LEDPORT0BITMASK: u16 = (1 << 3) | (1 << 4) | (1 << 11) | (1 << 12) | (1 <<
 const LEDPORT2BITMASK: u16 = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 12) | (1 << 13);
 
 // This is super ugly, but it will work for now
-// TODO: Make this less ugly
+// TODO: Make this less ugly, can I get an array of each individual pin block?
+// const PIN_PFS_BASE: *const ra4m1::pfs::RegisterBlock = ra4m1::PFS::PTR;
 const PIN_PFS_BASE: usize = 0x4004_0800;
 const PIN_PFS_OFFSET: usize = 0x04;
 const PIN_OFFSETS: [usize; 11] = [
@@ -160,35 +162,77 @@ fn turn_led(idx: usize, on: bool) {
     // struct's drop function?
     let [hi, lo] = PINS[idx];
     if on {
-        let hi_addr = PIN_PFS_BASE + PIN_OFFSETS[hi as usize];
-        let lo_addr = PIN_PFS_BASE + PIN_OFFSETS[lo as usize];
         unsafe {
+            let hi_addr = PIN_PFS_BASE + (PIN_OFFSETS[hi as usize]);
+            let lo_addr = PIN_PFS_BASE + (PIN_OFFSETS[lo as usize]);
             let hi_block = &*(hi_addr as *const ra4m1::pfs::P000PFS);
             hi_block.write(|w| w.bits(1 | 1 << 2));
             let lo_block = &*(lo_addr as *const ra4m1::pfs::P000PFS);
-            lo_block.modify(|_, w| w.bits(1 << 2));
+            lo_block.write(|w| w.bits(1 << 2));
         }
     }
 }
 
-// Globals to help the interrupt work well
-#[derive(Clone, Copy)]
-struct DisplayState {
-    current_index: usize,
-    framebuffer: [u32; 3],
+#[derive(defmt::Format)]
+pub enum AnimationData {
+    Animation(&'static [[u32; 4]]),
+    SingleFrame([u32; 4]),
 }
 
-// This will be used in the interrupt driven display
-static DISPLAY_STATE: Mutex<Cell<DisplayState>> = Mutex::new(Cell::new(DisplayState {
-    current_index: 0,
+impl AnimationData {
+    fn get_frame(&self, idx: usize) -> Option<&[u32; 4]> {
+        match self {
+            AnimationData::Animation(frames) => frames.get(idx),
+            AnimationData::SingleFrame(frame) if idx == 0 => Some(frame),
+            _ => None,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            AnimationData::Animation(frames) => frames.len(),
+            AnimationData::SingleFrame(_) => 1,
+        }
+    }
+}
+
+// Globals so the interrupt handler can... well... handle things
+#[derive(defmt::Format)]
+struct DisplayState {
+    current_pin_idx: usize,
+    framebuffer: [u32; 3],
+    animation: Option<AnimationData>, // Only works with compiled animations
+    current_frame_idx: usize,
+    curr_frame_duration: u32,
+    frame_start_millis: u32,
+    should_loop: bool,
+}
+impl DisplayState {
+    fn new() -> Self {
+        Self {
+            current_pin_idx: 0,
+            framebuffer: [0, 0, 0],
+            animation: None,
+            current_frame_idx: 0,
+            curr_frame_duration: 0,
+            frame_start_millis: 0,
+            should_loop: false,
+        }
+    }
+}
+
+static DISPLAY_STATE: Mutex<RefCell<DisplayState>> = Mutex::new(RefCell::new(DisplayState {
+    current_pin_idx: 0,
     framebuffer: [0, 0, 0],
+    animation: None,
+    current_frame_idx: 0,
+    curr_frame_duration: 0,
+    frame_start_millis: 0,
+    should_loop: false,
 }));
 
 // Hold the timer channel so we can clear the flag
 static TIMER_CHANNEL: Mutex<Cell<Option<u8>>> = Mutex::new(Cell::new(None));
-
-// Hold the lookup table for the pins
-// static PIN_LOOKUP: Mutex<Cell<Option<[DynamicPinErased; 11]>>> = Mutex::new(Cell::new(None));
 
 /// The 12x8 LED matrix on the board. This struct will hold all of the logic
 /// to get the thing to work.
@@ -242,8 +286,7 @@ impl<T: TimerInstance> LEDMatrix<T> {
             count_dir: CountDir::Up,
             freq_hz: 9600.0,
         };
-        let ledtimer = timer.into_periodic();
-        let ledtimer = ledtimer.configure(ledtimercfg);
+        let ledtimer = timer.into_periodic().configure(ledtimercfg);
 
         // Load timer channel into global space
         free(|cs| TIMER_CHANNEL.borrow(cs).set(Some(ledtimer.get_channel())));
@@ -259,17 +302,14 @@ impl<T: TimerInstance> LEDMatrix<T> {
         // 0x57 is the start of the GPTimer flag block, there are 8 flags per timer
         p.ICU.ielsr[9].write(|w| unsafe { w.iels().bits(0x57 + 8 * ledtimer.get_channel() + 6) });
 
-        defmt::println!("Channel is {}", ledtimer.get_channel());
-        defmt::println!(
-            "Linked event is {:03x}",
-            p.ICU.ielsr[9].read().iels().bits()
-        );
+        // defmt::println!("Channel is {}", ledtimer.get_channel());
+        // defmt::println!(
+        //     "Linked event is {:03x}",
+        //     p.ICU.ielsr[9].read().iels().bits()
+        // );
         // Initialize the global state
         free(|cs| {
-            DISPLAY_STATE.borrow(cs).set(DisplayState {
-                current_index: 0,
-                framebuffer: [0, 0, 0],
-            })
+            *DISPLAY_STATE.borrow(cs).borrow_mut() = DisplayState::new();
         });
 
         // Start the timer
@@ -296,35 +336,81 @@ impl<T: TimerInstance> LEDMatrix<T> {
         turn_led(led_idx, false);
     }
     pub fn clear(&mut self) {
-        let frame: [u32; 3] = [0, 0, 0];
-        self.load_frame(frame);
+        self.load_frame([0, 0, 0]);
     }
 
-    /// Load a single frame into the framebuffer
+    /// Load a single frame into the frame storage, I can't think of an easier
+    /// way right now
     pub fn load_frame(&mut self, frame: [u32; 3]) {
-        let this_frame: [u32; 3] = [
-            self.reverse(frame[0]),
-            self.reverse(frame[1]),
-            self.reverse(frame[2]),
-        ];
-
         free(|cs| {
-            // "state" is small enough that copy is fast and we don't need refcell
-            let mut state = DISPLAY_STATE.borrow(cs).get();
-            state.framebuffer = this_frame;
-            DISPLAY_STATE.borrow(cs).set(state);
+            let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
+
+            state.animation = Some(AnimationData::SingleFrame([
+                frame[0], frame[1], frame[2], 0,
+            ]));
+            state.current_frame_idx = 0;
+            state.curr_frame_duration = 0;
+            state.frame_start_millis = millis();
+            state.should_loop = false;
         });
+        next();
     }
 
-    /// Shamelessly stolen from the arduino code, need to learn why this bit twiddling works
-    fn reverse(&self, x: u32) -> u32 {
-        let mut x = ((x >> 1) & 0x55555555_u32) | ((x & 0x55555555_u32) << 1);
-        x = ((x >> 2) & 0x33333333_u32) | ((x & 0x33333333_u32) << 2);
-        x = ((x >> 4) & 0x0f0f0f0f_u32) | ((x & 0x0f0f0f0f_u32) << 4);
-        x = ((x >> 8) & 0x00ff00ff_u32) | ((x & 0x00ff00ff_u32) << 8);
-        x = ((x >> 16) & 0x0000ffff_u32) | ((x & 0x0000ffff_u32) << 16);
-        x
+    /// Arduino defines this function that just loads the wrapper. Idk why yet.
+    /// maybe something with the text animation library I'm not sure.
+    /// Currently this only works for animations with 'static lifetimes
+    pub fn load_sequence(&mut self, frames: &'static [[u32; 4]], should_loop: bool) {
+        // Load the frames into the global state
+        free(|cs| {
+            let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
+            state.animation = Some(AnimationData::Animation(frames));
+            state.current_frame_idx = 0;
+            state.curr_frame_duration = if !frames.is_empty() { frames[0][3] } else { 0 };
+            state.frame_start_millis = millis();
+            state.should_loop = should_loop;
+        });
+
+        next();
     }
+}
+/// Shamelessly stolen from the arduino code, need to learn why this bit twiddling works
+fn reverse(x: u32) -> u32 {
+    let mut x = ((x >> 1) & 0x55555555_u32) | ((x & 0x55555555_u32) << 1);
+    x = ((x >> 2) & 0x33333333_u32) | ((x & 0x33333333_u32) << 2);
+    x = ((x >> 4) & 0x0f0f0f0f_u32) | ((x & 0x0f0f0f0f_u32) << 4);
+    x = ((x >> 8) & 0x00ff00ff_u32) | ((x & 0x00ff00ff_u32) << 8);
+    x = ((x >> 16) & 0x0000ffff_u32) | ((x & 0x0000ffff_u32) << 16);
+    x
+}
+
+/// This function loads the next frame into the framebuffer for display
+fn next() {
+    free(|cs| {
+        let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
+
+        // Make sure we have something to do
+        let animation = match &state.animation {
+            Some(anim) => anim,
+            None => return,
+        };
+        let num_frames = animation.len();
+        let frame = match animation.get_frame(state.current_frame_idx) {
+            // Get an owned frame value to pass to the framebuffer
+            Some(f) => *f,
+            None => return,
+        };
+
+        // Load the frame into the framebuffer
+        state.framebuffer = [reverse(frame[0]), reverse(frame[1]), reverse(frame[2])];
+        state.curr_frame_duration = frame[3];
+
+        state.current_frame_idx = (state.current_frame_idx + 1) % num_frames;
+
+        // Should we loop?
+        if state.current_frame_idx == 0 && !state.should_loop {
+            state.curr_frame_duration = 0;
+        }
+    })
 }
 
 /// This is the function that drives the whole display. Make it not suck?
@@ -337,12 +423,11 @@ unsafe fn IEL9() {
 
     // Clear ICU flag
     p.ICU.ielsr[9].modify(|_, w| w.ir().clear_bit());
-    // Clear timer overflow flag
+    // Clear timer overflow flag (this is so gross ngl)
     let channel = free(|cs| TIMER_CHANNEL.borrow(cs).get());
     if let Some(ch) = channel {
         const GPTIMERBASE: usize = 0x4007_803C;
         const GPTIMEROFFSET: usize = 0x100;
-
         let timer_addr = GPTIMERBASE + (GPTIMEROFFSET * ch as usize);
 
         match ch {
@@ -359,17 +444,27 @@ unsafe fn IEL9() {
             }
         }
     }
-    // Continue on to do stuff
-    let mut curr_state = free(|cs| DISPLAY_STATE.borrow(cs).get());
-    let curr_idx = curr_state.current_index;
-    // let is_on = (curr_state.framebuffer[curr_idx >> 5] & (1 << (curr_idx & 31))) == 1;
-    let word = curr_idx >> 5;
-    let bit = curr_idx & 31;
-    let is_on = (curr_state.framebuffer[word] >> bit) & 1 == 1;
 
-    turn_led(curr_idx, is_on);
+    // Figure out the animation?
+    free(|cs| {
+        let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
 
-    curr_state.current_index = (curr_idx + 1) % 96;
+        let curr_idx = state.current_pin_idx;
+        let word = curr_idx >> 5;
+        let bit = curr_idx & 31;
+        let is_on = (state.framebuffer[word] >> bit) & 1 == 1;
 
-    free(|cs| DISPLAY_STATE.borrow(cs).set(curr_state));
+        turn_led(curr_idx, is_on);
+        state.current_pin_idx = (curr_idx + 1) % NUM_LEDS as usize;
+
+        // Time to advance?
+        if state.curr_frame_duration != 0
+            && millis() - state.frame_start_millis > state.curr_frame_duration
+        {
+            state.frame_start_millis = millis();
+            // Claude says to release the borrow here, but was wrong about other references
+            drop(state);
+            next();
+        }
+    })
 }

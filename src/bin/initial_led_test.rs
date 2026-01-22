@@ -2,9 +2,8 @@
 #![no_std]
 
 use cortex_m::delay::Delay;
-use uno_wifi_app::hal::gpio::{Pin, PinMode, Port};
+use uno_wifi_app::hal::gpio::{GpioExt, Pin, PinMode, unlock_pmnpfs_register};
 use uno_wifi_app::led_matrix;
-use uno_wifi_app::{self as _, time::SYSCLK_FREQ}; // global logger + panicking-behavior + memory layout
 
 // mod delay;
 
@@ -16,8 +15,11 @@ fn main() -> ! {
     defmt::println!("Launching application");
 
     let core_periph = cortex_m::Peripherals::take().unwrap();
-    // let periph = unsafe { ra4m1::Peripherals::steal() };
+    let periph = ra4m1::Peripherals::take().unwrap();
 
+    unsafe {
+        unlock_pmnpfs_register();
+    }
     // let p102_pfs = periph.PFS.p100pfs().get(2).unwrap();
     // // unlock the register, make the writes, and relock the register?
     // // defmt::println!("PWPR vals 0b{:032b}", periph.PMISC.pwpr.read().bits());
@@ -41,9 +43,12 @@ fn main() -> ! {
     // defmt::println!("Pin 012: 0xb{:032b}", p012_pfs.read().bits());
     // defmt::println!("Pin 205: 0xb{:032b}", p205_pfs.read().bits());
 
-    let mut delay = Delay::new(core_periph.SYST, SYSCLK_FREQ.raw());
-    let mut p012 = Pin::new(Port::PORT0, 12, PinMode::Output);
-    let mut p205 = Pin::new(Port::PORT2, 5, PinMode::Output);
+    let p0_pins = periph.PORT0.split();
+    let p2_pins = periph.PORT2.split();
+
+    let mut delay = Delay::new(core_periph.SYST, 48000000);
+    let mut p012 = p0_pins.p012.into_push_pull_output();
+    let mut p205 = p2_pins.p205.into_push_pull_output();
 
     defmt::println!("Entering main loop");
     loop {

@@ -5,6 +5,7 @@ pub mod display_info;
 pub mod hal;
 pub mod interrupts;
 pub mod led_matrix;
+pub mod millis_timer;
 
 use defmt_rtt as _; // global logger
 
