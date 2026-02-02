@@ -7,8 +7,11 @@ use crate::hal::timer::GPTimer;
 use crate::hal::timer::NotSet;
 use crate::hal::timer::Periodic;
 use crate::hal::timer::{Configured, PeriodicCfg, TimerInstance, Unconfigured};
+use crate::interrupts::Binding;
+use crate::interrupts::Handler;
 use crate::millis_timer::millis;
 use core::cell::{Cell, RefCell};
+use core::marker::PhantomData;
 use cortex_m::interrupt::{Mutex, free};
 use ra4m1::interrupt;
 
@@ -206,6 +209,7 @@ struct DisplayState {
     curr_frame_duration: u32,
     frame_start_millis: u32,
     should_loop: bool,
+    is_finished: bool,
 }
 impl DisplayState {
     fn new() -> Self {
@@ -217,6 +221,7 @@ impl DisplayState {
             curr_frame_duration: 0,
             frame_start_millis: 0,
             should_loop: false,
+            is_finished: false,
         }
     }
 }
@@ -229,10 +234,11 @@ static DISPLAY_STATE: Mutex<RefCell<DisplayState>> = Mutex::new(RefCell::new(Dis
     curr_frame_duration: 0,
     frame_start_millis: 0,
     should_loop: false,
+    is_finished: false,
 }));
 
-// Hold the timer channel so we can clear the flag
-static TIMER_CHANNEL: Mutex<Cell<Option<u8>>> = Mutex::new(Cell::new(None));
+// Hold the timer channel so we can clear the flag from the interrupt?
+// static TIMER_CHANNEL: Mutex<Cell<Option<u8>>> = Mutex::new(Cell::new(None));
 
 /// The 12x8 LED matrix on the board. This struct will hold all of the logic
 /// to get the thing to work.
@@ -247,7 +253,7 @@ pub struct LEDMatrix<T: TimerInstance> {
 impl<T: TimerInstance> LEDMatrix<T> {
     /// Initialize the matrix with the proper set of pins, all set to low.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<IRQ>(
         p003: Pin<0, 3, Input>,
         p004: Pin<0, 4, Input>,
         p011: Pin<0, 11, Input>,
@@ -260,7 +266,11 @@ impl<T: TimerInstance> LEDMatrix<T> {
         p212: Pin<2, 12, Input>,
         p213: Pin<2, 13, Input>,
         timer: GPTimer<T, Unconfigured, NotSet>,
-    ) -> Self {
+        _irq: IRQ,
+    ) -> Self
+    where
+        IRQ: Binding<LEDHandler<T>>,
+    {
         let dynpins: [DynamicPinErased; 11] = [
             p003.into_fully_erased_dynamic(),
             p004.into_fully_erased_dynamic(),
@@ -289,24 +299,22 @@ impl<T: TimerInstance> LEDMatrix<T> {
         let ledtimer = timer.into_periodic().configure(ledtimercfg);
 
         // Load timer channel into global space
-        free(|cs| TIMER_CHANNEL.borrow(cs).set(Some(ledtimer.get_channel())));
+        // free(|cs| TIMER_CHANNEL.borrow(cs).set(Some(ledtimer.get_channel())));
+
+        let led_interrupt = <IRQ as Binding<LEDHandler<T>>>::interrupt();
 
         // unmask the interrupt
         unsafe {
-            ra4m1::NVIC::unmask(ra4m1::interrupt::IEL9);
+            ra4m1::NVIC::unmask(led_interrupt);
         }
 
         // Attach timer overflow to interrupt.
         let p = unsafe { ra4m1::Peripherals::steal() };
-        // TODO: get hardcoded 9 from the trait when it's done
-        // 0x57 is the start of the GPTimer flag block, there are 8 flags per timer
-        p.ICU.ielsr[9].write(|w| unsafe { w.iels().bits(0x57 + 8 * ledtimer.get_channel() + 6) });
+        // TODO: Timer trait should have an associated constant for the "base" event
+        // so this is just base + offset instead of this channel garbage
+        p.ICU.ielsr[led_interrupt as usize]
+            .write(|w| unsafe { w.iels().bits(0x57 + 8 * ledtimer.get_channel() + 6) });
 
-        // defmt::println!("Channel is {}", ledtimer.get_channel());
-        // defmt::println!(
-        //     "Linked event is {:03x}",
-        //     p.ICU.ielsr[9].read().iels().bits()
-        // );
         // Initialize the global state
         free(|cs| {
             *DISPLAY_STATE.borrow(cs).borrow_mut() = DisplayState::new();
@@ -324,11 +332,9 @@ impl<T: TimerInstance> LEDMatrix<T> {
     pub fn stop(&self) {
         self.timer.stop();
     }
-
     pub fn start(&self) {
         self.timer.start();
     }
-
     pub fn on(&mut self, led_idx: usize) {
         turn_led(led_idx, true);
     }
@@ -337,6 +343,41 @@ impl<T: TimerInstance> LEDMatrix<T> {
     }
     pub fn clear(&mut self) {
         self.load_frame([0, 0, 0]);
+    }
+
+    pub fn sequence_finished(&self) -> bool {
+        free(|cs| DISPLAY_STATE.borrow(cs).borrow().is_finished)
+    }
+
+    /// Load a bitmap into the frame.
+    pub fn render_bitmap(&mut self, bitmap: &[[u8; 12]; 8]) {
+        // Need to map a 8 row x 12 col bitmap into a 3 word uint32
+        let mut frame: [u32; 3] = [0, 0, 0];
+        let mut pixel_index: usize = 0;
+        for row in bitmap.iter() {
+            for &val in row {
+                if val != 0 {
+                    let word = pixel_index >> 5;
+                    let bit = 31 - (pixel_index & 31);
+                    frame[word] |= 1 << bit;
+                }
+                pixel_index += 1;
+            }
+        }
+        self.load_frame(frame);
+    }
+
+    /// Render a "flatmap" into a frame
+    pub fn render_flatmap(&mut self, flatmap: &[u8; 96]) {
+        let mut frame: [u32; 3] = [0, 0, 0];
+        for (pixel_index, &val) in flatmap.iter().enumerate() {
+            if val != 0 {
+                let word = pixel_index >> 5;
+                let bit = 31 - (pixel_index & 31);
+                frame[word] |= 1 << bit;
+            }
+        }
+        self.load_frame(frame);
     }
 
     /// Load a single frame into the frame storage, I can't think of an easier
@@ -409,28 +450,29 @@ fn next() {
         // Should we loop?
         if state.current_frame_idx == 0 && !state.should_loop {
             state.curr_frame_duration = 0;
+            state.is_finished = true;
         }
     })
 }
 
-/// This is the function that drives the whole display. Make it not suck?
-/// I need to pass this in somehow, or figure out how the registering works
-/// in main.rs so I can pass in the correct interrupt. What if I don't want
-/// to use 9 by default?
-#[interrupt]
-unsafe fn IEL9() {
-    let p = unsafe { ra4m1::Peripherals::steal() };
+pub struct LEDHandler<T: TimerInstance> {
+    _phantom: PhantomData<T>,
+}
 
-    // Clear ICU flag
-    p.ICU.ielsr[9].modify(|_, w| w.ir().clear_bit());
-    // Clear timer overflow flag (this is so gross ngl)
-    let channel = free(|cs| TIMER_CHANNEL.borrow(cs).get());
-    if let Some(ch) = channel {
+impl<T: TimerInstance> Handler for LEDHandler<T> {
+    unsafe fn on_interrupt(interrupt: interrupt) {
+        let p = unsafe { ra4m1::Peripherals::steal() };
+        // Clear ICU flag
+        p.ICU.ielsr[interrupt as usize].modify(|_, w| w.ir().clear_bit());
+        // Clear timer overflow flag (this is so gross ngl)
+        let channel = T::CHANNEL;
+        // Is there a better way to do this?
+
         const GPTIMERBASE: usize = 0x4007_803C;
         const GPTIMEROFFSET: usize = 0x100;
-        let timer_addr = GPTIMERBASE + (GPTIMEROFFSET * ch as usize);
+        let timer_addr = GPTIMERBASE + (GPTIMEROFFSET * channel as usize);
 
-        match ch {
+        match channel {
             0..=1 => {
                 let block = unsafe { &*(timer_addr as *const ra4m1::gpt320::RegisterBlock) };
                 block.gtst.modify(|_, w| w.tcfpo().clear_bit());
@@ -443,28 +485,29 @@ unsafe fn IEL9() {
                 unreachable!();
             }
         }
+        // }
+
+        // Figure out the animation?
+        free(|cs| {
+            let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
+
+            let curr_idx = state.current_pin_idx;
+            let word = curr_idx >> 5;
+            let bit = curr_idx & 31;
+            let is_on = (state.framebuffer[word] >> bit) & 1 == 1;
+
+            turn_led(curr_idx, is_on);
+            state.current_pin_idx = (curr_idx + 1) % NUM_LEDS as usize;
+
+            // Time to advance?
+            if state.curr_frame_duration != 0
+                && millis() - state.frame_start_millis > state.curr_frame_duration
+            {
+                state.frame_start_millis = millis();
+                // Claude says to release the borrow here, but was wrong about other references
+                drop(state);
+                next();
+            }
+        })
     }
-
-    // Figure out the animation?
-    free(|cs| {
-        let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
-
-        let curr_idx = state.current_pin_idx;
-        let word = curr_idx >> 5;
-        let bit = curr_idx & 31;
-        let is_on = (state.framebuffer[word] >> bit) & 1 == 1;
-
-        turn_led(curr_idx, is_on);
-        state.current_pin_idx = (curr_idx + 1) % NUM_LEDS as usize;
-
-        // Time to advance?
-        if state.curr_frame_duration != 0
-            && millis() - state.frame_start_millis > state.curr_frame_duration
-        {
-            state.frame_start_millis = millis();
-            // Claude says to release the borrow here, but was wrong about other references
-            drop(state);
-            next();
-        }
-    })
 }

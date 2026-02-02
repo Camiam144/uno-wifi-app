@@ -150,7 +150,7 @@ pub enum TimerRegBlock {
     Block16(*const ra4m1::gpt162::RegisterBlock),
 }
 
-/// Generic trait across all timers types
+/// Generic trait across both GPT types (not AGT!)
 /// I can't put the register here because there's a 320 block and a 162 block.
 pub trait TimerInstance {
     type Width: TimerSize;
@@ -647,8 +647,6 @@ impl TimerExt for crate::pac::AGT1 {
 }
 
 /// AGT timer struct
-/// We will use AGT timer 0 for the system timer function much like the arduino
-/// built-in software
 ///
 /// This follows a lot of the same conventions as the GPT timer stuff, but
 /// adapted for AGT.

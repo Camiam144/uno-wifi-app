@@ -1,12 +1,14 @@
 #![no_main]
 #![no_std]
 
+use ra4m1::interrupt;
 // use cortex_m::asm::wfi;
 // use uno_wifi_app::display_info::show_info;
 use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
-use uno_wifi_app::led_matrix::LEDMatrix;
-use uno_wifi_app::millis_timer::{millis, set_up_millis};
+use uno_wifi_app::led_matrix::{self, LEDMatrix};
+use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
+use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
 mod animation;
@@ -15,22 +17,13 @@ mod animation;
 //      Interrupts assigned here
 // =================================
 
-// struct LedIrq {}
-// impl core::marker::Copy for LedIrq {}
-// impl core::clone::Clone for LedIrq {
-//     fn clone(&self) -> Self {
-//         *self
-//     }
-// }
-// #[interrupt]
-// fn IEL9() {
-//     unsafe { <led_matrix::DisplayHandler as interrupts::Handler>::on_interrupt(ra4m1::Interrupt:IEL9) };
-// }
-// unsafe impl interrupts::Binding<led_matrix::DisplayHandler> for LedIrq {
-//     fn interrupt() -> interrupt {
-//         ra4m1::Interrupt::IEL9
-//     }
-// }
+bind_interrupts!(struct MillisIrq {
+    IEL8 => crate::millis_timer::MillisHandler<crate::hal::timer::AGTimer0>;
+});
+
+bind_interrupts!(struct LedIrq {
+    IEL9 => led_matrix::LEDHandler<crate::hal::timer::Gpt2>;
+});
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -60,7 +53,10 @@ fn main() -> ! {
     // Also option is the AGTLCLK which runs off the LOCO and can run in low power
     // or snooze mode, this runs up to 32.768 kHz
     let agt0 = perph.AGT0.into_timer();
-    set_up_millis(agt0);
+    // Since I'm going to use agt0 here, I need to explicitly declare AGT0 in the
+    // interrupt preamble.
+    let mut millis_timer = MillisTimer::new(agt0, MillisIrq);
+    millis_timer.start();
 
     let p0_pins = perph.PORT0.split();
     let p2_pins = perph.PORT2.split();
@@ -79,51 +75,61 @@ fn main() -> ! {
     let p213 = p2_pins.p213.into_input();
 
     // Timer to drive LED display
-    let ledtimer = perph.GPT165.into_timer();
+    let ledtimer = perph.GPT162.into_timer();
 
     let mut display_matrix = LEDMatrix::new(
-        p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213, ledtimer,
+        p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213, ledtimer, LedIrq,
     );
-    static heart: [u32; 4] = [
-        0b00110001100001001010010001000100,
-        0b01000010000010000001000100000000,
-        0b10100000000001000000000000000000,
-        500,
-    ];
 
-    let on: [u32; 3] = [
-        0b00110001100001001010010001000100,
-        0b01000010000010000001000100000000,
-        0b10100000000001000000000000000000,
-    ];
-
-    static smile: [u32; 4] = [0x19819, 0x80000001, 0x81f8000, 500];
-
-    // let mut count_overflow: u32 = 0;
-    // let mut num_seconds: u32 = 0;
-    // let mut current_frame: usize = 0;
-
-    static frames: &[[u32; 4]; 2] = &[heart, smile];
-    display_matrix.load_sequence(&animation::animation, true);
+    // TODO: set up some non-blocking delay to wait until the sequence is finished
+    // using `.sequence_finished()` before moving to the next animation
+    display_matrix.load_sequence(&animation::animation, false);
     // display_matrix.load_frame(on);
 
+    // let mut last_millis = millis();
+    // let ms_per_frame = 1000;
+
+    // let bitmap: [[u8; 12]; 8] = [
+    //     [0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+    // ];
+    let mut flat_bitmap: [u8; 96] = [0; 96];
+    const SNAKE_LEN: usize = 5;
+    let snake: [u8; SNAKE_LEN] = [0; SNAKE_LEN];
+    let tick_dur = 250;
     let mut last_millis = millis();
-    let ms_per_frame = 1000;
+    let mut snake_tail = 0;
+    display_matrix.render_flatmap(&flat_bitmap);
 
     defmt::println!("Entering main loop");
     loop {
-        // We should overflow roughly 9600 times per second
-        // timer running at approx 9600 hz
-
-        let current_millis = millis();
-        //
-        if current_millis - last_millis > ms_per_frame {
-            last_millis = current_millis;
-            //     current_frame += 1;
-            //     current_frame %= frames.len();
-            defmt::println!("Seconds passed {}", last_millis);
-            //     display_matrix.load_frame(&frames[current_frame]);
+        if millis() - last_millis >= tick_dur {
+            last_millis = millis();
+            snake_tail += 1;
+            if snake_tail >= 96 {
+                snake_tail = 0;
+            }
+            flat_bitmap.fill(0);
+            light_snake(snake_tail, SNAKE_LEN, &mut flat_bitmap);
+            display_matrix.render_flatmap(&flat_bitmap);
         }
+        cortex_m::asm::wfi();
     }
     // uno_wifi_app::exit()
+}
+
+fn light_snake(snake_tail: usize, snake_len: usize, map: &mut [u8; 96]) {
+    let snake_head = snake_tail + snake_len;
+    for mut i in snake_tail..=snake_head {
+        if i >= 96 {
+            i %= 96;
+        }
+        map[i] = 1;
+    }
 }

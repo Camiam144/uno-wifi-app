@@ -13,36 +13,6 @@ name = "uno-wifi-app"
 test = false
 bench = false
 
-# [[bin]]
-# name = "bitfield"
-# path = "src/bin/bitfield.rs"
-# test = false
-#
-# [[bin]]
-# name = "format"
-# path = "src/bin/format.rs"
-# test = false
-#
-# [[bin]]
-# name = "hello"
-# path = "src/bin/hello.rs"
-# test = false
-#
-# [[bin]]
-# name = "levels"
-# path = "src/bin/levels.rs"
-# test = false
-#
-# [[bin]]
-# name = "overflow"
-# path = "src/bin/overflow.rs"
-# test = false
-#
-# [[bin]]
-# name = "panic"
-# path = "src/bin/panic.rs"
-# test = false
-#
 [lib]
 harness = false
 
