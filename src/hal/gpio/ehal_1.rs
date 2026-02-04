@@ -85,11 +85,13 @@ impl OutputPin for DynamicPinErased {
     }
 }
 
-impl InputPin for DynamicPinErased {
-    fn is_high(&mut self) -> Result<bool, Self::Error> {
-        Self::is_high(self)
-    }
-    fn is_low(&mut self) -> Result<bool, Self::Error> {
-        Self::is_low(self)
-    }
-}
+// DynamicPinErased I don't think can have these methods without a lot more
+// work on the type itself since it's all runtime information
+// impl InputPin for DynamicPinErased {
+//     fn is_high(&mut self) -> Result<bool, Self::Error> {
+//         Self::is_high(self)
+//     }
+//     fn is_low(&mut self) -> Result<bool, Self::Error> {
+//         Self::is_low(self)
+//     }
+// }

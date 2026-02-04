@@ -1,12 +1,10 @@
 use crate::hal::gpio::Input;
 use crate::hal::gpio::Pin;
 use crate::hal::gpio::erased::DynamicPinErased;
-use crate::hal::timer::CountDir;
-use crate::hal::timer::GPTSourceT;
-use crate::hal::timer::GPTimer;
-use crate::hal::timer::NotSet;
-use crate::hal::timer::Periodic;
-use crate::hal::timer::{Configured, PeriodicCfg, TimerInstance, Unconfigured};
+use crate::hal::timer::{
+    Configured, CountDir, GPTSourceT, GPTimer, NotSet, Periodic, PeriodicCfg, TimerInstance,
+    TimerRegBlock, Unconfigured,
+};
 use crate::interrupts::Binding;
 use crate::interrupts::Handler;
 use crate::millis_timer::millis;
@@ -401,7 +399,7 @@ impl<T: TimerInstance> LEDMatrix<T> {
     /// maybe something with the text animation library I'm not sure.
     /// Currently this only works for animations with 'static lifetimes
     pub fn load_sequence(&mut self, frames: &'static [[u32; 4]], should_loop: bool) {
-        // Load the frames into the global state
+        // Load the animation sequence into the global state
         free(|cs| {
             let mut state = DISPLAY_STATE.borrow(cs).borrow_mut();
             state.animation = Some(AnimationData::Animation(frames));
@@ -448,8 +446,10 @@ fn next() {
         state.current_frame_idx = (state.current_frame_idx + 1) % num_frames;
 
         // Should we loop?
-        if state.current_frame_idx == 0 && !state.should_loop {
-            state.curr_frame_duration = 0;
+        if state.current_frame_idx == 0 {
+            if !state.should_loop {
+                state.curr_frame_duration = 0;
+            }
             state.is_finished = true;
         }
     })
@@ -464,28 +464,16 @@ impl<T: TimerInstance> Handler for LEDHandler<T> {
         let p = unsafe { ra4m1::Peripherals::steal() };
         // Clear ICU flag
         p.ICU.ielsr[interrupt as usize].modify(|_, w| w.ir().clear_bit());
-        // Clear timer overflow flag (this is so gross ngl)
-        let channel = T::CHANNEL;
-        // Is there a better way to do this?
-
-        const GPTIMERBASE: usize = 0x4007_803C;
-        const GPTIMEROFFSET: usize = 0x100;
-        let timer_addr = GPTIMERBASE + (GPTIMEROFFSET * channel as usize);
-
-        match channel {
-            0..=1 => {
-                let block = unsafe { &*(timer_addr as *const ra4m1::gpt320::RegisterBlock) };
-                block.gtst.modify(|_, w| w.tcfpo().clear_bit());
-            }
-            2..=7 => {
-                let block = unsafe { &*(timer_addr as *const ra4m1::gpt162::RegisterBlock) };
-                block.gtst.modify(|_, w| w.tcfpo().clear_bit());
-            }
-            _ => {
-                unreachable!();
-            }
+        // Clear timer overflow flag
+        // too bad I can't pass in the actual timer from the LEDMatrix
+        match T::BLOCK {
+            TimerRegBlock::Block32(block) => unsafe {
+                (*block).gtst.modify(|_, w| w.tcfpo().clear_bit());
+            },
+            TimerRegBlock::Block16(block) => unsafe {
+                (*block).gtst.modify(|_, w| w.tcfpo().clear_bit());
+            },
         }
-        // }
 
         // Figure out the animation?
         free(|cs| {
@@ -504,7 +492,7 @@ impl<T: TimerInstance> Handler for LEDHandler<T> {
                 && millis() - state.frame_start_millis > state.curr_frame_duration
             {
                 state.frame_start_millis = millis();
-                // Claude says to release the borrow here, but was wrong about other references
+                // Release the borrow so next() doesn't panic
                 drop(state);
                 next();
             }

@@ -2,16 +2,14 @@
 #![no_std]
 
 use ra4m1::interrupt;
-// use cortex_m::asm::wfi;
-// use uno_wifi_app::display_info::show_info;
-use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
+use uno_wifi_app::hal::gpio::{GpioExt, PinExt, Pull, unlock_pmnpfs_register};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
+use uno_wifi_app::modulinos::enable_qwiic_bus;
 use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
-mod animation;
 
 // =================================
 //      Interrupts assigned here
@@ -33,25 +31,24 @@ fn main() -> ! {
 
     // let core_periph = cortex_m::Peripherals::take().unwrap();
 
+    // uncomment this line to get a dump of a bunch of registers for inspection
+    // or debugging purposes.
     // show_info(&perph);
 
+    // Eventually I should have some `init(perph)` function that sets up the board
+    // as I expect
     unsafe {
         unlock_pmnpfs_register();
         enable_gptimers();
         enable_agtimers();
+        enable_qwiic_bus();
     }
 
     unsafe {
         cortex_m::interrupt::enable();
     }
-    // we're using IEL8 and IEL9 right now, need some way to track and pass them around
 
     // We are using AGT0 to drive the `millis()` function. This timer is driven
-    // by a divider of PCLKB, which can be 1, 2, or 8, or a selectable divider
-    // of AGTLCLK or AGTSCLK/d (d = 1, 2, 4, 8, 16, 32, 64, or 128)
-    // By default, PCLKB is running at 1/2 main speed, so 24 MHz
-    // Also option is the AGTLCLK which runs off the LOCO and can run in low power
-    // or snooze mode, this runs up to 32.768 kHz
     let agt0 = perph.AGT0.into_timer();
     // Since I'm going to use agt0 here, I need to explicitly declare AGT0 in the
     // interrupt preamble.
@@ -81,31 +78,287 @@ fn main() -> ! {
         p003, p004, p011, p012, p013, p015, p204, p205, p206, p212, p213, ledtimer, LedIrq,
     );
 
-    // TODO: set up some non-blocking delay to wait until the sequence is finished
-    // using `.sequence_finished()` before moving to the next animation
-    display_matrix.load_sequence(&animation::animation, false);
-    // display_matrix.load_frame(on);
-
-    // let mut last_millis = millis();
-    // let ms_per_frame = 1000;
-
-    // let bitmap: [[u8; 12]; 8] = [
-    //     [0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    //     [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-    // ];
     let mut flat_bitmap: [u8; 96] = [0; 96];
     const SNAKE_LEN: usize = 5;
-    let snake: [u8; SNAKE_LEN] = [0; SNAKE_LEN];
     let tick_dur = 250;
     let mut last_millis = millis();
     let mut snake_tail = 0;
     display_matrix.render_flatmap(&flat_bitmap);
+
+    // Get some stuff for the qwiic? Should be on iic bus 0
+    let p4_pins = perph.PORT4.split();
+    let qwiic_sda = p4_pins.p401.into_pullup_input().internal_resistor(Pull::Up);
+    let qwiic_scl = p4_pins.p400.into_pullup_input().internal_resistor(Pull::Up);
+    let iic0_bus = perph.IIC0;
+
+    // This is all very raw for now, move this into modulinos.rs asap.
+    // Set the pins to the right setting (IIC0 and also as peripheral functions)
+    qwiic_sda
+        .pmnpfs_reg()
+        .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
+    qwiic_sda
+        .pmnpfs_reg()
+        .modify(|_, w| unsafe { w.psel().bits(0b00111) });
+
+    qwiic_scl
+        .pmnpfs_reg()
+        .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
+    qwiic_scl
+        .pmnpfs_reg()
+        .modify(|_, w| unsafe { w.psel().bits(0b00111) });
+
+    let sda = qwiic_sda.pmnpfs_reg().read().bits();
+    let scl = qwiic_scl.pmnpfs_reg().read().bits();
+
+    defmt::println!("sda: 0b{:032b}", sda);
+    defmt::println!("scl: 0b{:032b}", scl);
+
+    // I think the address for the 8 pixel modulino is 0x6C or 0x36
+    // thermo is 0x44? Buttons 0x7C or maybe 0x3E?
+    // depends on Docs for "Modulino Library" vs hardware address
+    // Some of the modules are software-addressable though.
+    //
+    // Follow the steps outlined in figure 29.5 in manual:
+    // SCL0, SDA0 pins not driven
+    iic0_bus.iccr1.modify(|_, w| w.ice().clear_bit());
+    // IIC reset
+    iic0_bus.iccr1.modify(|_, w| w.iicrst().set_bit());
+    // Internal reset, SCL0, SDA0 pins in active state
+    iic0_bus.iccr1.modify(|_, w| w.ice().set_bit());
+    // set transfer bit rate in ICMR1 and ICBRL/ICBRH
+    // for now we will leave the icmr1 clock as the default PCLKB clock,
+    // which is running at 24 MHz. Standard slow mode is 100 kHz. I have these
+    // precalculated
+    iic0_bus.icmr1.modify(|_, w| w.cks()._011());
+    iic0_bus.icbrh.modify(|_, w| unsafe { w.brh().bits(0xA) });
+    iic0_bus.icbrl.modify(|_, w| unsafe { w.brl().bits(0xC) });
+    // I don't know how many interrupts to set. Maybe for now we use the four
+    // noacknowledge, recieve full, transmit end, and transmit empty.
+    // Use polling for now fix this later
+    // iic0_bus.icier.modify(|_, w| {
+    //     w.nakie()
+    //         .set_bit()
+    //         .rie()
+    //         .set_bit()
+    //         .teie()
+    //         .set_bit()
+    //         .tie()
+    //         .set_bit()
+    // });
+    // Should be done now? Release the reset
+    iic0_bus.iccr1.modify(|_, w| w.iicrst().clear_bit());
+    // Check some stuff I guess
+    let iccr1 = iic0_bus.iccr1.read().bits();
+    defmt::println!("iccr1 0b{:08b}", iccr1);
+    let icmr1 = iic0_bus.icmr1.read().bits();
+    defmt::println!("icmr1 0b{:08b}", icmr1);
+    let icbrh = iic0_bus.icbrh.read().bits();
+    defmt::println!("icbrh 0b{:08b}", icbrh);
+    let icbrl = iic0_bus.icbrl.read().bits();
+    defmt::println!("icbrl 0b{:08b}", icbrl);
+
+    // First we have to broadcast the address of the temp probe with "WRITE"
+    // Read the BBSY flag in ICCR2, then set ST in ICCR2 to 1
+    if iic0_bus.iccr2.read().bbsy().bit_is_set() {
+        defmt::println!("Bus isn't clear?");
+    }
+    // Issue start condition request
+    iic0_bus.iccr2.modify(|_, w| w.st().set_bit());
+    // Now we're in master transmit mode
+    // We should check the TDRE flag in ICSR2
+    let mut iccr2 = iic0_bus.iccr2.read().bits();
+    defmt::println!("iccr2 0b{:08b}", iccr2);
+    // At this point the registe is 1110000 which means
+    // bus busy, master mode, transmit mode
+
+    if iic0_bus.icsr2.read().tdre().bit_is_clear() {
+        defmt::println!("Bus not in transmit mode");
+        let icsr2 = iic0_bus.icsr2.read().bits();
+        defmt::println!("icsr2 0b{:08b}", icsr2);
+    }
+    // let addr = 0x44;
+    let addr = 0x36; // Arduino says this is 6C in software but 0x36 in hardware?
+    let mut payload: u8 = addr << 1;
+    // payload += 1; // read mode?
+    iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(payload) });
+    defmt::println!("payload {:08b}", payload);
+    // Check if response
+    iccr2 = iic0_bus.iccr2.read().bits();
+    defmt::println!("iccr2 0b{:08b}", iccr2);
+    let icsr2 = iic0_bus.icsr2.read().bits();
+    defmt::println!("icsr2 0b{:08b}", icsr2);
+
+    if iic0_bus.icsr2.read().nackf().bit_is_set() {
+        let icsr2 = iic0_bus.icsr2.read().bits();
+        defmt::println!("icsr2 0b{:08b}", icsr2);
+        defmt::println!("No module responded on {:02x}", addr);
+        iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
+        // wait for bus to stop
+        let now = millis();
+        while millis() - now <= 5 {
+            cortex_m::asm::nop();
+        }
+        uno_wifi_app::exit();
+    }
+
+    let pixel_data: [u8; 32] = [
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+        0x0E | 25,
+        255,
+        0,
+        255,
+    ];
+
+    for val in pixel_data.iter() {
+        //Check for nack
+        if !iic0_bus.icsr2.read().nackf().bit_is_clear() {
+            defmt::println!("NACK from slave on write");
+            iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
+            // wait for bus to stop
+            let now = millis();
+            while millis() - now <= 5 {
+                cortex_m::asm::nop();
+            }
+            uno_wifi_app::exit();
+        }
+        // Wait for tdre flag to set, indicating write buffer is empty
+        while iic0_bus.icsr2.read().tdre().bit_is_clear() {
+            cortex_m::asm::nop();
+        }
+
+        // Bit is 1, we can write:
+        iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(*val) });
+    }
+
+    while iic0_bus.icsr2.read().tend().bit_is_clear() {
+        cortex_m::asm::nop();
+    }
+
+    // Issue a stop condition so the sensor takes a measurement
+    iic0_bus.icsr2.modify(|_, w| w.stop().clear_bit());
+    iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
+    //
+    // Wait for the thing to stop
+    while iic0_bus.icsr2.read().stop().bit_is_clear() {
+        cortex_m::asm::nop();
+    }
+
+    // Clear STOP and NACKF flags
+    iic0_bus
+        .icsr2
+        .modify(|_, w| w.stop().clear_bit().nackf().clear_bit());
+
+    // // For the temp sensor, we need to let it do a measurement so just
+    // // busy wait for a measurement
+    // let now = millis();
+    // while millis() - now <= 100 {
+    //     cortex_m::asm::nop();
+    // }
+    //
+    // let iccr1 = iic0_bus.iccr1.read().bits();
+    // defmt::println!("xmit iccr1 0b{:08b}", iccr1);
+    //
+    // // Now we should be able to read
+    // // check if bus is busy
+    // if iic0_bus.iccr2.read().bbsy().bit_is_set() {
+    //     defmt::println!("Bus for recieve isn't clear?");
+    // }
+    // // issue a start command
+    // iic0_bus.iccr2.modify(|_, w| w.st().set_bit());
+    // payload = (addr << 1) | 0b00000001; // read mode
+    // iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(payload) });
+    // defmt::println!("payload {:08b}", payload);
+    //
+    // iccr2 = iic0_bus.iccr2.read().bits();
+    // defmt::println!("xmit iccr2 0b{:08b}", iccr2);
+    // let icsr2 = iic0_bus.icsr2.read().bits();
+    // defmt::println!("xmit icsr2 0b{:08b}", icsr2);
+    //
+    // if iic0_bus.icsr2.read().nackf().bit_is_set() {
+    //     let icsr2 = iic0_bus.icsr2.read().bits();
+    //     defmt::println!("icsr2 0b{:08b}", icsr2);
+    //     defmt::println!("No module responded to read on {:02x}", addr);
+    //     iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
+    //     uno_wifi_app::exit();
+    // }
+    // // Wait for TDRE bit to indicate transmission done
+    // while iic0_bus.icsr2.read().tdre().bit_is_set() {
+    //     cortex_m::asm::nop();
+    // }
+    //
+    // iccr2 = iic0_bus.iccr2.read().bits();
+    // defmt::println!("xmit iccr2 0b{:08b}", iccr2);
+    // let icsr2 = iic0_bus.icsr2.read().bits();
+    // defmt::println!("xmit icsr2 0b{:08b}", icsr2);
+    //
+    // // Wait for RDRF bit to be set
+    // defmt::println!("Waiting for dummy rdrf read");
+    // while iic0_bus.icsr2.read().rdrf().bit_is_clear() {
+    //     cortex_m::asm::nop();
+    // }
+    //
+    // // Dummy read to start stuff
+    // let _ = iic0_bus.icdrr.read().icdrr().bits();
+    // // Now for the temp/humidity module we should get 4 bytes of data back
+    // let mut recieved: [u8; 4] = [0; 4];
+    // // now we should do 4 consecutive reads
+    // for (i, item) in recieved.iter_mut().enumerate() {
+    //     while iic0_bus.icsr2.read().rdrf().bit_is_clear() {
+    //         cortex_m::asm::nop();
+    //     }
+    //     *item = iic0_bus.icdrr.read().icdrr().bits();
+    //     if i == 2 {
+    //         // Next byte is 2nd to last to se do this thing
+    //         iic0_bus.icmr3.modify(|_, w| w.wait().set_bit());
+    //     }
+    //     if i == 3 {
+    //         // Next byte is the last one so we set nack and set stop condition
+    //         iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
+    //         iic0_bus.icmr3.modify(|_, w| w.ackbt().set_bit());
+    //     }
+    //     defmt::println!("{}", item);
+    // }
+    //
+    // // set flags for next op
+    // iic0_bus
+    //     .icsr2
+    //     .modify(|_, w| w.nackf().clear_bit().stop().clear_bit());
+    //
+    // // Do some magic stuff
+    // let humid: u16 = ((recieved[0] as u16 & 0b00111111) << 8_u16) + recieved[1] as u16;
+    // let temperature: u16 = ((recieved[2] as u16) << 6_u16) + ((recieved[3] as u16) >> 2);
+    //
+    // let pct_h = pct_humid(humid);
+    // let celcius = temp_c(temperature);
+
+    // defmt::println!("Temp: {} and humidity {}", celcius, pct_h);
 
     defmt::println!("Entering main loop");
     loop {
@@ -119,6 +372,7 @@ fn main() -> ! {
             light_snake(snake_tail, SNAKE_LEN, &mut flat_bitmap);
             display_matrix.render_flatmap(&flat_bitmap);
         }
+
         cortex_m::asm::wfi();
     }
     // uno_wifi_app::exit()
@@ -132,4 +386,13 @@ fn light_snake(snake_tail: usize, snake_len: usize, map: &mut [u8; 96]) {
         }
         map[i] = 1;
     }
+}
+
+// Stuff for nw
+fn pct_humid(humid: u16) -> u16 {
+    (humid / (2_u16.pow(14) - 1)) * 100
+}
+
+fn temp_c(temp: u16) -> i32 {
+    ((temp / (2_u16.pow(14) - 1)) as i32) * 165 - 40
 }

@@ -24,7 +24,7 @@ pub fn millis() -> u32 {
 /// We are using an AGT to drive the `millis()` function. This timer is driven
 /// by a divider of PCLKB, which can be 1, 2, or 8, or a selectable divider
 /// of AGTLCLK or AGTSCLK/d (d = 1, 2, 4, 8, 16, 32, 64, or 128)
-/// By default, PCLKB is running at 1/2 main speed, so 24 MHz
+/// By default bootloader setup, PCLKB is running at 1/2 main speed, so 24 MHz
 /// Also option is the AGTLCLK which runs off the LOCO and can run in low power
 /// or snooze mode, this runs up to 32.768 kHz
 pub struct MillisTimer<T: AGTimerInstance> {

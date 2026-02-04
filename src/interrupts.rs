@@ -112,6 +112,7 @@ pub enum IRQn_Type {
 // }
 
 // This handles some simple binding to ensure we do the interrupts correctly I think
+// it works for my needs for now so don't touch it too much
 #[macro_export]
 macro_rules! bind_interrupts {
     (struct $name:ident {
@@ -119,23 +120,23 @@ macro_rules! bind_interrupts {
         $irq:ident => $handler:ty;
     )*
     }) => {
-#[derive(Copy, Clone)]
-        struct $name;
-        $(
-        #[interrupt]
-        fn $irq() {
+    #[derive(Copy, Clone)]
+    struct $name;
+    $(
+    #[interrupt]
+    fn $irq() {
         unsafe {
-        <$handler as $crate::interrupts::Handler>::on_interrupt(ra4m1::Interrupt::$irq)
+            <$handler as $crate::interrupts::Handler>::on_interrupt(ra4m1::Interrupt::$irq)
         };
-        }
-        )*
-        $(
-        unsafe impl $crate::interrupts::Binding<$handler> for $name {
+    }
+    )*
+    $(
+    unsafe impl $crate::interrupts::Binding<$handler> for $name {
         fn interrupt() -> ra4m1::Interrupt {
-        ra4m1::Interrupt::$irq
+            ra4m1::Interrupt::$irq
         }
-        }
-        )*
+    }
+    )*
     };
 }
 
@@ -147,7 +148,6 @@ pub trait Handler {
     /// This binds to a specific interrupt enum
     ///
     /// # Safety
-    ///
     /// All safety rules related to calling interrupts applies.
     unsafe fn on_interrupt(interrupt: Interrupt);
 }

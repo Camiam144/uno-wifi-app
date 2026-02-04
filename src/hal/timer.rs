@@ -200,7 +200,7 @@ gptimer!(GPT165, Gpt5, Bits16, Block16, 5);
 gptimer!(GPT166, Gpt6, Bits16, Block16, 6);
 gptimer!(GPT167, Gpt7, Bits16, Block16, 7);
 
-// THis should be read from somewhere
+// THis should be read from somewhere, preferably as part of the board init.
 const MCU_FREQ: u32 = 48_000_000;
 
 /// Generic General Purpose timer struct
@@ -215,6 +215,8 @@ pub struct GPTimer<T: TimerInstance, CFG, MODE> {
     _mode: PhantomData<MODE>,
 }
 
+// Think really hard about what should be attached to the GPTimer and what should
+// be attached to the TimerInstance trait.
 #[allow(clippy::new_without_default)]
 impl<T: TimerInstance, CFG, MODE> GPTimer<T, CFG, MODE> {
     pub fn new() -> Self {
