@@ -35,6 +35,10 @@ fn stripped_type_name<T>() -> &'static str {
     p.last().unwrap()
 }
 
+pub fn scale(val: usize, in_min: usize, in_max: usize, out_min: usize, out_max: usize) -> usize {
+    (val - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+}
+
 /// Hardfault handler.
 ///
 /// Terminates the application and makes a semihosting-capable debug tool exit

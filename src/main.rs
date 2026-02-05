@@ -3,10 +3,11 @@
 
 use ra4m1::interrupt;
 use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
+use uno_wifi_app::hal::i2c::{Iic0, enable_qwiic_bus};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
-use uno_wifi_app::modulinos::{I2cError, Iic0, enable_qwiic_bus};
+use uno_wifi_app::modulinos::ModulinoPixels;
 use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -91,143 +92,27 @@ fn main() -> ! {
     let p401 = p4_pins.p401;
     let iic0_bus = perph.IIC0;
 
-    let modulino = Iic0::new(iic0_bus, p401, p400);
+    let qwiic_bus = Iic0::new(iic0_bus, p401, p400);
 
-    // Each pixel is [brightness, B, G, R]
-    let pixel_data: [u8; 32] = [
-        0xE0 | 1,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 4,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 8,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 16,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 31,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 16,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 8,
-        0,
-        0xFF,
-        0xFF,
-        0xE0 | 4,
-        0,
-        0xFF,
-        0xFF,
-    ];
+    let mut modulino_pixel = ModulinoPixels::new();
 
-    let pixel_addr = 0x36;
+    for i in 0..ModulinoPixels::NUMLEDS {
+        modulino_pixel.set(i, 255, 0, 255, 50);
+    }
 
-    match modulino.write_blocking(pixel_addr, &pixel_data, true, true) {
-        Ok(()) => {
-            defmt::println!("pixels woo");
-        }
+    match qwiic_bus.write_blocking(
+        modulino_pixel.address(),
+        &modulino_pixel.as_buffer(),
+        true,
+        true,
+    ) {
+        Ok(()) => {}
         Err(err) => {
             defmt::println!("oh no: {}", err)
         }
     }
 
-    // for val in pixel_data.iter() {
-    //Check for nack
-
-    // // For the temp sensor, we need to let it do a measurement so just
-    // // busy wait for a measurement
-    // let now = millis();
-    // while millis() - now <= 100 {
-    //     cortex_m::asm::nop();
-    // }
-    //
-    // let iccr1 = iic0_bus.iccr1.read().bits();
-    // defmt::println!("xmit iccr1 0b{:08b}", iccr1);
-    //
-    // // Now we should be able to read
-    // // check if bus is busy
-    // if iic0_bus.iccr2.read().bbsy().bit_is_set() {
-    //     defmt::println!("Bus for recieve isn't clear?");
-    // }
-    // // issue a start command
-    // iic0_bus.iccr2.modify(|_, w| w.st().set_bit());
-    // payload = (addr << 1) | 0b00000001; // read mode
-    // iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(payload) });
-    // defmt::println!("payload {:08b}", payload);
-    //
-    // iccr2 = iic0_bus.iccr2.read().bits();
-    // defmt::println!("xmit iccr2 0b{:08b}", iccr2);
-    // let icsr2 = iic0_bus.icsr2.read().bits();
-    // defmt::println!("xmit icsr2 0b{:08b}", icsr2);
-    //
-    // if iic0_bus.icsr2.read().nackf().bit_is_set() {
-    //     let icsr2 = iic0_bus.icsr2.read().bits();
-    //     defmt::println!("icsr2 0b{:08b}", icsr2);
-    //     defmt::println!("No module responded to read on {:02x}", addr);
-    //     iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
-    //     uno_wifi_app::exit();
-    // }
-    // // Wait for TDRE bit to indicate transmission done
-    // while iic0_bus.icsr2.read().tdre().bit_is_set() {
-    //     cortex_m::asm::nop();
-    // }
-    //
-    // iccr2 = iic0_bus.iccr2.read().bits();
-    // defmt::println!("xmit iccr2 0b{:08b}", iccr2);
-    // let icsr2 = iic0_bus.icsr2.read().bits();
-    // defmt::println!("xmit icsr2 0b{:08b}", icsr2);
-    //
-    // // Wait for RDRF bit to be set
-    // defmt::println!("Waiting for dummy rdrf read");
-    // while iic0_bus.icsr2.read().rdrf().bit_is_clear() {
-    //     cortex_m::asm::nop();
-    // }
-    //
-    // // Dummy read to start stuff
-    // let _ = iic0_bus.icdrr.read().icdrr().bits();
-    // // Now for the temp/humidity module we should get 4 bytes of data back
-    // let mut recieved: [u8; 4] = [0; 4];
-    // // now we should do 4 consecutive reads
-    // for (i, item) in recieved.iter_mut().enumerate() {
-    //     while iic0_bus.icsr2.read().rdrf().bit_is_clear() {
-    //         cortex_m::asm::nop();
-    //     }
-    //     *item = iic0_bus.icdrr.read().icdrr().bits();
-    //     if i == 2 {
-    //         // Next byte is 2nd to last to se do this thing
-    //         iic0_bus.icmr3.modify(|_, w| w.wait().set_bit());
-    //     }
-    //     if i == 3 {
-    //         // Next byte is the last one so we set nack and set stop condition
-    //         iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
-    //         iic0_bus.icmr3.modify(|_, w| w.ackbt().set_bit());
-    //     }
-    //     defmt::println!("{}", item);
-    // }
-    //
-    // // set flags for next op
-    // iic0_bus
-    //     .icsr2
-    //     .modify(|_, w| w.nackf().clear_bit().stop().clear_bit());
-    //
-    // // Do some magic stuff
-    // let humid: u16 = ((recieved[0] as u16 & 0b00111111) << 8_u16) + recieved[1] as u16;
-    // let temperature: u16 = ((recieved[2] as u16) << 6_u16) + ((recieved[3] as u16) >> 2);
-    //
-    // let pct_h = pct_humid(humid);
-    // let celcius = temp_c(temperature);
-
-    // defmt::println!("Temp: {} and humidity {}", celcius, pct_h);
-
+    let mut curr_pix = 0;
     defmt::println!("Entering main loop");
     loop {
         if millis() - last_millis >= tick_dur {
@@ -239,6 +124,30 @@ fn main() -> ! {
             flat_bitmap.fill(0);
             light_snake(snake_tail, SNAKE_LEN, &mut flat_bitmap);
             display_matrix.render_flatmap(&flat_bitmap);
+
+            // Then do pixel stuff
+            modulino_pixel.clear_all();
+            for i in 0..ModulinoPixels::NUMLEDS {
+                if i == curr_pix {
+                    let bright: u8 = ((i * 100 + 8) / 8) as u8;
+                    modulino_pixel.set(i, 128, 255, 128, bright);
+                }
+                // modulino_pixel.clear_pixel(i);
+            }
+
+            match qwiic_bus.write_blocking(
+                modulino_pixel.address(),
+                &modulino_pixel.as_buffer(),
+                true,
+                true,
+            ) {
+                Ok(()) => {}
+                Err(err) => {
+                    defmt::println!("oh no: {}", err)
+                }
+            }
+            curr_pix += 1;
+            curr_pix %= ModulinoPixels::NUMLEDS;
         }
 
         cortex_m::asm::wfi();
@@ -257,14 +166,10 @@ fn light_snake(snake_tail: usize, snake_len: usize, map: &mut [u8; 96]) {
 }
 
 // Stuff for nw
-fn pct_humid(humid: u16) -> u16 {
-    (humid / (2_u16.pow(14) - 1)) * 100
-}
-
-fn temp_c(temp: u16) -> i32 {
-    ((temp / (2_u16.pow(14) - 1)) as i32) * 165 - 40
-}
-
-fn scale(val: usize, in_min: usize, in_max: usize, out_min: usize, out_max: usize) -> usize {
-    (val - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
-}
+// fn pct_humid(humid: u16) -> u16 {
+//     (humid / (2_u16.pow(14) - 1)) * 100
+// }
+//
+// fn temp_c(temp: u16) -> i32 {
+//     ((temp / (2_u16.pow(14) - 1)) as i32) * 165 - 40
+// }
