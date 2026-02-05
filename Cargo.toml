@@ -26,7 +26,7 @@ cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7", features = ["device"] }
 defmt = "1.0"
 defmt-rtt = "1.0"
-embedded-hal = "1.0.0"
+embedded-hal = { version="1.0.0", features = ["defmt-03"] }
 fugit = "0.3.9"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 ra4m1 = { version = "0.2.1", git = "https://github.com/ra-rs/ra", features = ["critical-section", "rt"] }

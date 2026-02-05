@@ -2,11 +2,11 @@
 #![no_std]
 
 use ra4m1::interrupt;
-use uno_wifi_app::hal::gpio::{GpioExt, PinExt, Pull, unlock_pmnpfs_register};
+use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
-use uno_wifi_app::modulinos::enable_qwiic_bus;
+use uno_wifi_app::modulinos::{I2cError, Iic0, enable_qwiic_bus};
 use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -87,193 +87,61 @@ fn main() -> ! {
 
     // Get some stuff for the qwiic? Should be on iic bus 0
     let p4_pins = perph.PORT4.split();
-    let qwiic_sda = p4_pins.p401.into_pullup_input().internal_resistor(Pull::Up);
-    let qwiic_scl = p4_pins.p400.into_pullup_input().internal_resistor(Pull::Up);
+    let p400 = p4_pins.p400;
+    let p401 = p4_pins.p401;
     let iic0_bus = perph.IIC0;
 
-    // This is all very raw for now, move this into modulinos.rs asap.
-    // Set the pins to the right setting (IIC0 and also as peripheral functions)
-    qwiic_sda
-        .pmnpfs_reg()
-        .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
-    qwiic_sda
-        .pmnpfs_reg()
-        .modify(|_, w| unsafe { w.psel().bits(0b00111) });
+    let modulino = Iic0::new(iic0_bus, p401, p400);
 
-    qwiic_scl
-        .pmnpfs_reg()
-        .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
-    qwiic_scl
-        .pmnpfs_reg()
-        .modify(|_, w| unsafe { w.psel().bits(0b00111) });
-
-    let sda = qwiic_sda.pmnpfs_reg().read().bits();
-    let scl = qwiic_scl.pmnpfs_reg().read().bits();
-
-    defmt::println!("sda: 0b{:032b}", sda);
-    defmt::println!("scl: 0b{:032b}", scl);
-
-    // I think the address for the 8 pixel modulino is 0x6C or 0x36
-    // thermo is 0x44? Buttons 0x7C or maybe 0x3E?
-    // depends on Docs for "Modulino Library" vs hardware address
-    // Some of the modules are software-addressable though.
-    //
-    // Follow the steps outlined in figure 29.5 in manual:
-    // SCL0, SDA0 pins not driven
-    iic0_bus.iccr1.modify(|_, w| w.ice().clear_bit());
-    // IIC reset
-    iic0_bus.iccr1.modify(|_, w| w.iicrst().set_bit());
-    // Internal reset, SCL0, SDA0 pins in active state
-    iic0_bus.iccr1.modify(|_, w| w.ice().set_bit());
-    // set transfer bit rate in ICMR1 and ICBRL/ICBRH
-    // for now we will leave the icmr1 clock as the default PCLKB clock,
-    // which is running at 24 MHz. Standard slow mode is 100 kHz. I have these
-    // precalculated
-    iic0_bus.icmr1.modify(|_, w| w.cks()._011());
-    iic0_bus.icbrh.modify(|_, w| unsafe { w.brh().bits(0xA) });
-    iic0_bus.icbrl.modify(|_, w| unsafe { w.brl().bits(0xC) });
-    // I don't know how many interrupts to set. Maybe for now we use the four
-    // noacknowledge, recieve full, transmit end, and transmit empty.
-    // Use polling for now fix this later
-    // iic0_bus.icier.modify(|_, w| {
-    //     w.nakie()
-    //         .set_bit()
-    //         .rie()
-    //         .set_bit()
-    //         .teie()
-    //         .set_bit()
-    //         .tie()
-    //         .set_bit()
-    // });
-    // Should be done now? Release the reset
-    iic0_bus.iccr1.modify(|_, w| w.iicrst().clear_bit());
-    // Check some stuff I guess
-    let iccr1 = iic0_bus.iccr1.read().bits();
-    defmt::println!("iccr1 0b{:08b}", iccr1);
-    let icmr1 = iic0_bus.icmr1.read().bits();
-    defmt::println!("icmr1 0b{:08b}", icmr1);
-    let icbrh = iic0_bus.icbrh.read().bits();
-    defmt::println!("icbrh 0b{:08b}", icbrh);
-    let icbrl = iic0_bus.icbrl.read().bits();
-    defmt::println!("icbrl 0b{:08b}", icbrl);
-
-    // First we have to broadcast the address of the temp probe with "WRITE"
-    // Read the BBSY flag in ICCR2, then set ST in ICCR2 to 1
-    if iic0_bus.iccr2.read().bbsy().bit_is_set() {
-        defmt::println!("Bus isn't clear?");
-    }
-    // Issue start condition request
-    iic0_bus.iccr2.modify(|_, w| w.st().set_bit());
-    // Now we're in master transmit mode
-    // We should check the TDRE flag in ICSR2
-    let mut iccr2 = iic0_bus.iccr2.read().bits();
-    defmt::println!("iccr2 0b{:08b}", iccr2);
-    // At this point the registe is 1110000 which means
-    // bus busy, master mode, transmit mode
-
-    if iic0_bus.icsr2.read().tdre().bit_is_clear() {
-        defmt::println!("Bus not in transmit mode");
-        let icsr2 = iic0_bus.icsr2.read().bits();
-        defmt::println!("icsr2 0b{:08b}", icsr2);
-    }
-    // let addr = 0x44;
-    let addr = 0x36; // Arduino says this is 6C in software but 0x36 in hardware?
-    let mut payload: u8 = addr << 1;
-    // payload += 1; // read mode?
-    iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(payload) });
-    defmt::println!("payload {:08b}", payload);
-    // Check if response
-    iccr2 = iic0_bus.iccr2.read().bits();
-    defmt::println!("iccr2 0b{:08b}", iccr2);
-    let icsr2 = iic0_bus.icsr2.read().bits();
-    defmt::println!("icsr2 0b{:08b}", icsr2);
-
-    if iic0_bus.icsr2.read().nackf().bit_is_set() {
-        let icsr2 = iic0_bus.icsr2.read().bits();
-        defmt::println!("icsr2 0b{:08b}", icsr2);
-        defmt::println!("No module responded on {:02x}", addr);
-        iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
-        // wait for bus to stop
-        let now = millis();
-        while millis() - now <= 5 {
-            cortex_m::asm::nop();
-        }
-        uno_wifi_app::exit();
-    }
-
+    // Each pixel is [brightness, B, G, R]
     let pixel_data: [u8; 32] = [
-        0x0E | 25,
-        255,
+        0xE0 | 1,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 4,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 8,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 16,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 31,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 16,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 8,
         0,
-        255,
-        0x0E | 25,
-        255,
+        0xFF,
+        0xFF,
+        0xE0 | 4,
         0,
-        255,
+        0xFF,
+        0xFF,
     ];
 
-    for val in pixel_data.iter() {
-        //Check for nack
-        if !iic0_bus.icsr2.read().nackf().bit_is_clear() {
-            defmt::println!("NACK from slave on write");
-            iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
-            // wait for bus to stop
-            let now = millis();
-            while millis() - now <= 5 {
-                cortex_m::asm::nop();
-            }
-            uno_wifi_app::exit();
+    let pixel_addr = 0x36;
+
+    match modulino.write_blocking(pixel_addr, &pixel_data, true, true) {
+        Ok(()) => {
+            defmt::println!("pixels woo");
         }
-        // Wait for tdre flag to set, indicating write buffer is empty
-        while iic0_bus.icsr2.read().tdre().bit_is_clear() {
-            cortex_m::asm::nop();
+        Err(err) => {
+            defmt::println!("oh no: {}", err)
         }
-
-        // Bit is 1, we can write:
-        iic0_bus.icdrt.write(|w| unsafe { w.icdrt().bits(*val) });
     }
 
-    while iic0_bus.icsr2.read().tend().bit_is_clear() {
-        cortex_m::asm::nop();
-    }
-
-    // Issue a stop condition so the sensor takes a measurement
-    iic0_bus.icsr2.modify(|_, w| w.stop().clear_bit());
-    iic0_bus.iccr2.modify(|_, w| w.sp().set_bit());
-    //
-    // Wait for the thing to stop
-    while iic0_bus.icsr2.read().stop().bit_is_clear() {
-        cortex_m::asm::nop();
-    }
-
-    // Clear STOP and NACKF flags
-    iic0_bus
-        .icsr2
-        .modify(|_, w| w.stop().clear_bit().nackf().clear_bit());
+    // for val in pixel_data.iter() {
+    //Check for nack
 
     // // For the temp sensor, we need to let it do a measurement so just
     // // busy wait for a measurement
@@ -395,4 +263,8 @@ fn pct_humid(humid: u16) -> u16 {
 
 fn temp_c(temp: u16) -> i32 {
     ((temp / (2_u16.pow(14) - 1)) as i32) * 165 - 40
+}
+
+fn scale(val: usize, in_min: usize, in_max: usize, out_min: usize, out_max: usize) -> usize {
+    (val - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 }
