@@ -8,7 +8,7 @@ use crate::hal::timer::{
 use crate::interrupts::Binding;
 use crate::interrupts::Handler;
 use crate::millis_timer::millis;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::marker::PhantomData;
 use cortex_m::interrupt::{Mutex, free};
 use ra4m1::interrupt;
@@ -145,7 +145,6 @@ const PIN_OFFSETS: [usize; 11] = [
 /// idx must be 0 <= idx <= 95 (for our 96 grid LED)
 fn turn_led(idx: usize, on: bool) {
     // Unsafe write to set the whole LED screen to low
-    // *TECHNICALLY* we should be doing this pin by pin but this is probably faster
     // Should *TECHNICALLY* be safe enough because we own all of the pins
     let p1 = ra4m1::PORT0::PTR;
     let p2 = ra4m1::PORT2::PTR;
@@ -158,9 +157,6 @@ fn turn_led(idx: usize, on: bool) {
             .modify(|r, w| w.pdr().bits(r.pdr().bits() & !LEDPORT2BITMASK));
     }
 
-    // Since the pins are owned by the struct, they can't come out until the
-    // struct goes out of scope, at which point we should reset them in the
-    // struct's drop function?
     let [hi, lo] = PINS[idx];
     if on {
         unsafe {
@@ -235,9 +231,6 @@ static DISPLAY_STATE: Mutex<RefCell<DisplayState>> = Mutex::new(RefCell::new(Dis
     is_finished: false,
 }));
 
-// Hold the timer channel so we can clear the flag from the interrupt?
-// static TIMER_CHANNEL: Mutex<Cell<Option<u8>>> = Mutex::new(Cell::new(None));
-
 /// The 12x8 LED matrix on the board. This struct will hold all of the logic
 /// to get the thing to work.
 pub struct LEDMatrix<T: TimerInstance> {
@@ -283,9 +276,6 @@ impl<T: TimerInstance> LEDMatrix<T> {
             p213.into_fully_erased_dynamic(),
         ];
 
-        // Load the pins into the global lookup for the interrupt
-        // free(|cs| PIN_LOOKUP.borrow(cs).set(Some(dynpins)));
-
         // Set up the timer
         let ledtimercfg: PeriodicCfg = PeriodicCfg {
             gtssr: GPTSourceT::SOFTWARE,
@@ -295,9 +285,6 @@ impl<T: TimerInstance> LEDMatrix<T> {
             freq_hz: 9600.0,
         };
         let ledtimer = timer.into_periodic().configure(ledtimercfg);
-
-        // Load timer channel into global space
-        // free(|cs| TIMER_CHANNEL.borrow(cs).set(Some(ledtimer.get_channel())));
 
         let led_interrupt = <IRQ as Binding<LEDHandler<T>>>::interrupt();
 
@@ -465,7 +452,6 @@ impl<T: TimerInstance> Handler for LEDHandler<T> {
         // Clear ICU flag
         p.ICU.ielsr[interrupt as usize].modify(|_, w| w.ir().clear_bit());
         // Clear timer overflow flag
-        // too bad I can't pass in the actual timer from the LEDMatrix
         match T::BLOCK {
             TimerRegBlock::Block32(block) => unsafe {
                 (*block).gtst.modify(|_, w| w.tcfpo().clear_bit());
@@ -492,7 +478,7 @@ impl<T: TimerInstance> Handler for LEDHandler<T> {
                 && millis() - state.frame_start_millis > state.curr_frame_duration
             {
                 state.frame_start_millis = millis();
-                // Release the borrow so next() doesn't panic
+                // Release the borrow on the global state so next() doesn't panic
                 drop(state);
                 next();
             }

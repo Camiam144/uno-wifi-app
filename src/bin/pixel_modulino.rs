@@ -3,7 +3,7 @@
 
 use ra4m1::interrupt;
 use uno_wifi_app::hal::gpio::{GpioExt, unlock_pmnpfs_register};
-use uno_wifi_app::hal::i2c::{I2cBus, enable_qwiic_bus};
+use uno_wifi_app::hal::i2c::{Iic0, enable_qwiic_bus};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
@@ -22,13 +22,6 @@ bind_interrupts!(struct MillisIrq {
 
 bind_interrupts!(struct LedIrq {
     IEL9 => led_matrix::LEDHandler<crate::hal::timer::Gpt2>;
-});
-
-bind_interrupts!(struct QwiicIrq {
-    IEL10 => hal::i2c::TXI_Handler<ra4m1::IIC0>;
-    IEL11 => hal::i2c::TEI_Handler<ra4m1::IIC0>;
-    IEL12 => hal::i2c::RXI_Handler<ra4m1::IIC0>;
-    IEL13 => hal::i2c::NAK_Handler<ra4m1::IIC0>;
 });
 
 #[cortex_m_rt::entry]
@@ -99,7 +92,7 @@ fn main() -> ! {
     let p401 = p4_pins.p401;
     let iic0_bus = perph.IIC0;
 
-    let qwiic_bus = I2cBus::new(iic0_bus, p401, p400, QwiicIrq);
+    let qwiic_bus = Iic0::new(iic0_bus, p401, p400);
 
     let mut modulino_pixel = ModulinoPixels::new();
 
@@ -113,38 +106,13 @@ fn main() -> ! {
         true,
         true,
     ) {
-        Ok(()) => {
-            defmt::println!("pixels?");
-        }
+        Ok(()) => {}
         Err(err) => {
-            defmt::println!("oh no: {}", err);
-            uno_wifi_app::exit();
+            defmt::println!("oh no: {}", err)
         }
     }
 
-    // wait for measurement to be made
-    // let now = millis();
-    // while millis() - now < 20 {
-    //     cortex_m::asm::nop();
-    // }
-
-    // Try and read
-    // match qwiic_bus.read_blocking(addr, &mut read_buf, true, true) {
-    //     Ok(()) => {
-    //         defmt::println!("Read success");
-    //     }
-    //     Err(err) => {
-    //         defmt::println!("Read issue {}", err);
-    //         uno_wifi_app::exit();
-    //     }
-    // }
-    //
-    // for val in read_buf {
-    //     defmt::println!("read buf {}", val);
-    // }
-
-    let mut frame_num = 0;
-
+    let mut curr_pix = 0;
     defmt::println!("Entering main loop");
     loop {
         if millis() - last_millis >= tick_dur {
@@ -157,14 +125,12 @@ fn main() -> ! {
             light_snake(snake_tail, SNAKE_LEN, &mut flat_bitmap);
             display_matrix.render_flatmap(&flat_bitmap);
 
+            // Then do pixel stuff
             modulino_pixel.clear_all();
             for i in 0..ModulinoPixels::NUMLEDS {
-                if (i & 1) == frame_num {
-                    // let bright: u8 = ((i * 100 + 8) / 8) as u8;
-                    let r: u8 = (255 - (i * 255) / 8).try_into().unwrap();
-                    let b: u8 = ((i * 255) / 8).try_into().unwrap();
-                    let g: u8 = (128_usize.abs_diff((i * 255) / 8)).try_into().unwrap();
-                    modulino_pixel.set(i, r, b, g, 50);
+                if i == curr_pix {
+                    let bright: u8 = ((i * 100 + 8) / 8) as u8;
+                    modulino_pixel.set(i, 128, 255, 128, bright);
                 }
                 // modulino_pixel.clear_pixel(i);
             }
@@ -177,12 +143,11 @@ fn main() -> ! {
             ) {
                 Ok(()) => {}
                 Err(err) => {
-                    defmt::println!("oh no: {}", err);
-                    uno_wifi_app::exit();
+                    defmt::println!("oh no: {}", err)
                 }
             }
-            frame_num += 1;
-            frame_num &= 1;
+            curr_pix += 1;
+            curr_pix %= ModulinoPixels::NUMLEDS;
         }
 
         cortex_m::asm::wfi();

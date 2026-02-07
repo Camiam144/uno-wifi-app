@@ -21,6 +21,10 @@ impl Pixel {
         self.b = b;
         self.brightness = 0xE0 | scaled_bright;
     }
+
+    pub fn as_buffer(&self) -> [u8; 4] {
+        [self.brightness, self.b, self.g, self.r]
+    }
 }
 
 pub struct ModulinoPixels {
