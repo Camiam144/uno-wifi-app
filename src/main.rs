@@ -7,7 +7,7 @@ use uno_wifi_app::hal::i2c::{I2cBus, enable_qwiic_bus};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
-use uno_wifi_app::modulinos::ModulinoPixels;
+// use uno_wifi_app::modulinos::ModulinoPixels;
 use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -88,8 +88,8 @@ fn main() -> ! {
 
     let mut flat_bitmap: [u8; 96] = [0; 96];
     const SNAKE_LEN: usize = 5;
-    let tick_dur = 250;
-    let mut last_millis = millis();
+    let snake_tick_dur = 250;
+    let mut last_snake = millis();
     let mut snake_tail = 0;
     display_matrix.render_flatmap(&flat_bitmap);
 
@@ -101,54 +101,50 @@ fn main() -> ! {
 
     let qwiic_bus = I2cBus::new(iic0_bus, p401, p400, QwiicIrq);
 
-    let mut modulino_pixel = ModulinoPixels::new();
+    let temp_humid_addr = 0x44;
+    // let test_nack = 0x30;
 
-    for i in 0..ModulinoPixels::NUMLEDS {
-        modulino_pixel.set(i, 255, 0, 255, 50);
-    }
-
-    match qwiic_bus.write_blocking(
-        modulino_pixel.address(),
-        &modulino_pixel.as_buffer(),
-        true,
-        true,
-    ) {
-        Ok(()) => {
-            defmt::println!("pixels?");
+    // Should be a zero data write, then a short delay, then a 4 byte read.
+    let res = qwiic_bus.write_blocking(temp_humid_addr, &[], true, true);
+    match res {
+        Ok(_) => {
+            defmt::println!("good write");
         }
         Err(err) => {
-            defmt::println!("oh no: {}", err);
+            defmt::println!("Oh no bad write: {}", err);
             uno_wifi_app::exit();
         }
     }
 
-    // wait for measurement to be made
-    // let now = millis();
-    // while millis() - now < 20 {
-    //     cortex_m::asm::nop();
-    // }
+    // Try the receive
+    let now = millis();
+    let measurement_time = 40;
 
-    // Try and read
-    // match qwiic_bus.read_blocking(addr, &mut read_buf, true, true) {
-    //     Ok(()) => {
-    //         defmt::println!("Read success");
-    //     }
-    //     Err(err) => {
-    //         defmt::println!("Read issue {}", err);
-    //         uno_wifi_app::exit();
-    //     }
-    // }
-    //
-    // for val in read_buf {
-    //     defmt::println!("read buf {}", val);
-    // }
+    while millis() - now < measurement_time {
+        cortex_m::asm::nop();
+    }
 
-    let mut frame_num = 0;
+    let mut received: [u8; 4] = [0; 4];
 
+    let rec = qwiic_bus.read_blocking(temp_humid_addr, &mut received, true, true);
+
+    match rec {
+        Ok(_) => {
+            defmt::println!("good read");
+            defmt::println!("Recieved data: {}", received);
+        }
+        Err(err) => {
+            defmt::println!("Oh no bad write: {}", err);
+            uno_wifi_app::exit();
+        }
+    }
+
+    let update_dir = 1500;
+    let mut last_update = millis();
     defmt::println!("Entering main loop");
     loop {
-        if millis() - last_millis >= tick_dur {
-            last_millis = millis();
+        if millis() - last_snake >= snake_tick_dur {
+            last_snake = millis();
             snake_tail += 1;
             if snake_tail >= 96 {
                 snake_tail = 0;
@@ -156,33 +152,72 @@ fn main() -> ! {
             flat_bitmap.fill(0);
             light_snake(snake_tail, SNAKE_LEN, &mut flat_bitmap);
             display_matrix.render_flatmap(&flat_bitmap);
+        }
 
-            modulino_pixel.clear_all();
-            for i in 0..ModulinoPixels::NUMLEDS {
-                if (i & 1) == frame_num {
-                    // let bright: u8 = ((i * 100 + 8) / 8) as u8;
-                    let r: u8 = (255 - (i * 255) / 8).try_into().unwrap();
-                    let b: u8 = ((i * 255) / 8).try_into().unwrap();
-                    let g: u8 = (128_usize.abs_diff((i * 255) / 8)).try_into().unwrap();
-                    modulino_pixel.set(i, r, b, g, 50);
+        if millis() - last_update >= update_dir {
+            last_update = millis();
+            // Should be a zero data write, then a short delay, then a 4 byte read.
+            let res = qwiic_bus.write_blocking(temp_humid_addr, &[], true, true);
+            match res {
+                Ok(_) => {
+                    defmt::println!("good write");
                 }
-                // modulino_pixel.clear_pixel(i);
-            }
-
-            match qwiic_bus.write_blocking(
-                modulino_pixel.address(),
-                &modulino_pixel.as_buffer(),
-                true,
-                true,
-            ) {
-                Ok(()) => {}
                 Err(err) => {
-                    defmt::println!("oh no: {}", err);
+                    defmt::println!("Oh no bad write: {}", err);
                     uno_wifi_app::exit();
                 }
             }
-            frame_num += 1;
-            frame_num &= 1;
+
+            while millis() - last_update < measurement_time {
+                // could be a wfi?
+                cortex_m::asm::nop();
+            }
+
+            let rec = qwiic_bus.read_blocking(temp_humid_addr, &mut received, true, true);
+
+            match rec {
+                Ok(_) => {
+                    defmt::println!("good read");
+                    defmt::println!("Recieved data: {}", received);
+                }
+                Err(err) => {
+                    defmt::println!("Oh no bad write: {}", err);
+                    uno_wifi_app::exit();
+                }
+            }
+
+            let stale = (received[0] & 0b11000000) >> 6;
+            let humid_high: u16 = (received[0] as u16) & 0b00111111;
+            let humid_low: u16 = received[1] as u16;
+            let humidity = (humid_high << 8) | humid_low;
+            // let humidity: u16 = u16::from_be_bytes([(received[0] & 0b00111111), received[1]]);
+            let temp_high: u16 = received[2] as u16;
+            let temp_low: u16 = ((received[3] as u16) >> 2) << 2 | 0b10;
+            let temp: u16 = ((temp_high << 8) | temp_low) >> 2;
+            // let temp: u16 = u16::from_be_bytes([received[2], received[3] >> 2]);
+
+            // defmt::println!(
+            //     "raw stale 0b{:02b} raw humid 0b{:016b} raw temp 0b{:016b}",
+            //     stale,
+            //     humidity,
+            //     temp
+            // );
+            // defmt::println!(
+            //     "raw stale {} raw humid {} raw temp {}",
+            //     stale,
+            //     humidity,
+            //     temp
+            // );
+
+            let pct_h = pct_humid(humidity.into());
+            let temp_cels = temp_c(temp.into());
+
+            defmt::println!(
+                "Stale {}, Pct H {}%, Temp C {}degC",
+                stale,
+                pct_h,
+                temp_cels
+            );
         }
 
         cortex_m::asm::wfi();
@@ -201,10 +236,10 @@ fn light_snake(snake_tail: usize, snake_len: usize, map: &mut [u8; 96]) {
 }
 
 // Stuff for nw
-// fn pct_humid(humid: u16) -> u16 {
-//     (humid / (2_u16.pow(14) - 1)) * 100
-// }
-//
-// fn temp_c(temp: u16) -> i32 {
-//     ((temp / (2_u16.pow(14) - 1)) as i32) * 165 - 40
-// }
+fn pct_humid(humid: f32) -> f32 {
+    (humid / (16384.0 - 1.0)) * 100.0
+}
+
+fn temp_c(temp: f32) -> f32 {
+    (temp / (16384.0 - 1.0)) * 165.0 - 40.0
+}

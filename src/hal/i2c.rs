@@ -169,6 +169,7 @@ impl<I: I2cInstance> Handler for TEI_Handler<I> {
             }
 
             // Ignore clippy for now, maybe we want other stuff here later?
+            // TEI will fire after the first transmit of a 10 bit address.
             match globals.state {
                 BusState::Writing(_addr, idx, len) => {
                     if idx >= len {
@@ -204,8 +205,14 @@ impl<I: I2cInstance> Handler for TXI_Handler<I> {
             if let BusState::Error(_) = globals.state {
                 return;
             }
+
             match globals.state {
                 BusState::Writing(address, idx, len) => {
+                    if len > BUFF_SIZE {
+                        globals.state = BusState::Error(I2cError::Overrun);
+                        return;
+                    }
+
                     if globals.is_first_trans {
                         // Initial write, need to send address and write bit
                         // defmt::println!("First transaction launching address");
@@ -224,15 +231,17 @@ impl<I: I2cInstance> Handler for TXI_Handler<I> {
                         globals.state = BusState::Writing(address, idx + 1, len);
                     }
                 }
-                BusState::Reading(address, _idx, _len) => {
+                BusState::Reading(address, 0, _len) => {
                     // Reading is handled by the rxi interrupt but we still need
                     // the first transaction to set the read bits correctly.
-                    defmt::println!("initiating read command");
+                    // defmt::println!("initiating read command");
                     if globals.is_first_trans {
                         let addr = address << 1;
                         bus_regs
                             .icdrt
                             .write(|w| unsafe { w.icdrt().bits(addr | 1) });
+                        // Do not advance global idx state or we get the
+                        // RXI out of whack. First RXI trigger needs idx = 0
                         globals.is_first_trans = false;
                     }
                 }
@@ -254,7 +263,162 @@ pub struct RXI_Handler<I: I2cInstance> {
 
 impl<I: I2cInstance> Handler for RXI_Handler<I> {
     unsafe fn on_interrupt(interrupt: ra4m1::Interrupt) {
-        todo!();
+        // Clear ICU interrupt
+        let p = unsafe { ra4m1::Peripherals::steal() };
+        p.ICU.ielsr[interrupt as usize].modify(|_, w| w.ir().clear_bit());
+
+        // defmt::println!("RXI Fired");
+        free(|cs| {
+            let mut globals = I2C_GLOBAL.borrow(cs).borrow_mut();
+            let bus_regs = unsafe { &*I::reg_block() };
+
+            // Make sure we didn't nack from the device
+            if let BusState::Error(_) = globals.state {
+                return;
+            }
+
+            // This is kind of complex depending on how many bytes we have remaining
+            // In all cases ( >2 bytes, 2 bytes, 1 byte total) we have to dummy read.
+            // Timing of dummy read changes depending on how many bytes we expect.
+            // if we have more than 2, we dummy read immediately after address ack
+            // and then read each byte until there are only two remaining bytes.
+            // when we have exactly 2 remaining, we set the WAIT flag before reading,
+            // then read the 2nd to last byte, then wait for 1 byte remaining, then nack
+            // and clear flags and request a stop then read the final byte.
+            // I am not sure if I have to stop before reading the byte or if I can
+            // read and then request a stop.
+            // if we only had 2 bytes total, we set wait, then dummy read, then nack.
+            // if we have exactly 1, we set wait, then nack, then dummy read.
+
+            // The docs say to issue stop with SP *before* reading the register.
+            // might need to issue the stop and set the bus to stopping
+            // and then have a "short stop" method if the bus stop has already
+            // been triggered so I don't deadlock
+            match globals.state {
+                BusState::Reading(_addr, idx, 1) => {
+                    // Set Wait, Set Nack, dummy read, read, done
+                    // Wait
+                    bus_regs.icmr3.modify(|_, w| w.wait().set_bit());
+                    // need to unlock ackbit before setting
+                    bus_regs.icmr3.modify(|_, w| w.ackwp().set_bit());
+                    // Nack
+                    bus_regs.icmr3.modify(|_, w| w.ackbt().set_bit());
+                    // Relock reg
+                    bus_regs.icmr3.modify(|_, w| w.ackwp().clear_bit());
+                    // Dummy read
+                    let _ = bus_regs.icdrr.read().icdrr().bits();
+                    // Actual read
+                    // idx is always zero.
+                    globals.buffer[idx] = bus_regs.icdrr.read().icdrr().bits();
+                    // Done
+                    globals.state = BusState::Complete;
+                }
+                BusState::Reading(addr, idx, 2) => {
+                    // Set Wait, Dummy read, then nack, read, read, done.
+                    // This could live in an "outer match" like BusState::Reading(addr, N, 2)
+                    // where I move through the various Ns
+                    // but I think this is clearer for now.
+                    match idx {
+                        0 => {
+                            // On first RXI fire, set wait, dummy read.
+                            // Wait
+                            bus_regs.icmr3.modify(|_, w| w.wait().set_bit());
+                            // Dummy read before first byte
+                            let _ = bus_regs.icdrr.read().icdrr().bits();
+                            // Advance state
+                            globals.state = BusState::Reading(addr, 1, 2);
+                        }
+                        1 => {
+                            // Second RXI fire, set nack, real read, 1 byte remaning
+                            // unlock reg
+                            bus_regs.icmr3.modify(|_, w| w.ackwp().set_bit());
+                            // Nack
+                            bus_regs.icmr3.modify(|_, w| w.ackbt().set_bit());
+                            // Relock reg
+                            bus_regs.icmr3.modify(|_, w| w.ackwp().clear_bit());
+                            // Real read
+                            globals.buffer[0] = bus_regs.icdrr.read().icdrr().bits();
+                            // Advance state
+                            globals.state = BusState::Reading(addr, 2, 2);
+                        }
+                        _ => {
+                            // Should only ever be idx = 2
+                            if idx > 2 {
+                                globals.state = BusState::Error(I2cError::Overrun);
+                                return;
+                            }
+                            // Third and final RXI fire
+                            // Real read & update globals
+                            globals.buffer[1] = bus_regs.icdrr.read().icdrr().bits();
+                            // clear Wait
+                            bus_regs.icmr3.modify(|_, w| w.wait().clear_bit());
+                            // Done, issue stop condition (done in blocking loop)
+                            globals.state = BusState::Complete;
+                        }
+                    }
+                }
+                BusState::Reading(addr, idx, len) => {
+                    // Check how many bytes are remaining
+                    // this is how many remain *after* the current read
+                    let n_bytes_remaining = len - idx;
+
+                    // Note, this runs in the OPPOSITE order of the previous
+                    // match arms. Here 0 is the final byte to read, not idx = 0.
+                    match n_bytes_remaining {
+                        0 => {
+                            // Final byte to read, set stop, read, clear wait flag.
+                            // again, I set stop after reading, this might need to
+                            // be changed.
+                            // Read
+                            globals.buffer[idx - 1] = bus_regs.icdrr.read().icdrr().bits();
+                            // Clear wait
+                            bus_regs.icmr3.modify(|_, w| w.wait().clear_bit());
+                            // Done
+                            globals.state = BusState::Complete;
+                        }
+                        1 => {
+                            // One byte remaining *after* current read, nack
+                            // unlock reg
+                            bus_regs.icmr3.modify(|_, w| w.ackwp().set_bit());
+                            // Nack
+                            bus_regs.icmr3.modify(|_, w| w.ackbt().set_bit());
+                            // Relock reg
+                            bus_regs.icmr3.modify(|_, w| w.ackwp().clear_bit());
+                            // Read
+                            globals.buffer[idx - 1] = bus_regs.icdrr.read().icdrr().bits();
+                            // Advance state
+                            globals.state = BusState::Reading(addr, idx + 1, len);
+                        }
+                        2 => {
+                            // Two bytes remaining after current read, set wait
+                            // Wait
+                            bus_regs.icmr3.modify(|_, w| w.wait().set_bit());
+                            // Read
+                            globals.buffer[idx - 1] = bus_regs.icdrr.read().icdrr().bits();
+                            // Advance state
+                            globals.state = BusState::Reading(addr, idx + 1, len);
+                        }
+                        _ => {
+                            // This special case could go outside in the match block
+                            // since len <= 2 has already been caught higher up.
+                            if idx == 0 {
+                                // First read, do the dummy read stuff
+                                // On first RXI fire, dummy read.
+                                let _ = bus_regs.icdrr.read().icdrr().bits();
+                                // Advance state
+                                globals.state = BusState::Reading(addr, 1, len);
+                            } else {
+                                // Real read
+                                globals.buffer[idx - 1] = bus_regs.icdrr.read().icdrr().bits();
+                                // Advance state
+                                globals.state = BusState::Reading(addr, idx + 1, len);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
     }
 }
 
@@ -443,7 +607,9 @@ impl<I: I2cInstance> I2cBus<I> {
             // put the data into the buffer
             // if we had a ringbuffer this would also work.
             // defmt::println!("Pushing data");
-            tx.buffer[0..buffer.len()].copy_from_slice(buffer);
+            if !buffer.is_empty() {
+                tx.buffer[0..buffer.len()].copy_from_slice(buffer);
+            }
             tx.state = BusState::Writing(address, 0, buffer.len());
         });
 
@@ -508,93 +674,98 @@ impl<I: I2cInstance> I2cBus<I> {
 
     // Executes a blocking read operation for as many bytes are in the buffer
     // Don't pass empty read buffers yet.
+    // clobbers the buffer you pass in, make sure it's long enough;
     // Only 7 bit addresses for now.
     // start indicates if this is the start of an operation
     // stop indicatees if we need to send a stop condition
-    // pub fn read_blocking(
-    //     &self,
-    //     address: SevenBitAddress,
-    //     buffer: &mut [u8],
-    //     start: bool,
-    //     stop: bool,
-    // ) -> Result<(), I2cError> {
-    //     if start {
-    //         if self.bus.iccr2.read().bbsy().bit_is_set() {
-    //             // Return an error, bus is busy
-    //             defmt::println!("bus busy");
-    //             return Err(I2cError::Bus);
-    //         }
-    //         // Issue start condition request
-    //         self.start_request();
-    //
-    //         // Wait for bus to move to transmit mode
-    //         while self.bus.icsr2.read().tdre().bit_is_clear() {
-    //             cortex_m::asm::nop();
-    //         }
-    //     }
-    //
-    //     // Set up the read transaction
-    //     let addr = (address << 1) | 1;
-    //     // Put the address and the 1 read bit into the register
-    //     self.bus.icdrt.write(|w| unsafe { w.icdrt().bits(addr) });
-    //
-    //     // Check for target ack:
-    //     if self.bus.icsr2.read().nackf().bit_is_set() {
-    //         // Stop the bus and return an error
-    //         self.stop_bus();
-    //         return Err(I2cError::NoAcknowledge(i2c::NoAcknowledgeSource::Address));
-    //     }
-    //     // Unlock the ackbt bit to use during the read
-    //     self.bus.icmr3.modify(|_, w| w.ackwp().set_bit());
-    //
-    //     // Spin wait until there is data to dummy read
-    //     while self.bus.icsr2.read().rdrf().bit_is_clear() {
-    //         cortex_m::asm::nop();
-    //     }
-    //     // dummy read to start the clock
-    //     let _ = self.bus.icdrr.read().icdrr().bits();
-    //
-    //     // Rread the whole buffer. I need some logic for 1 & 2 byte reads?
-    //     let num_bytes = buffer.len();
-    //     for (bytenum, read_buffer) in buffer.iter_mut().enumerate() {
-    //         let bytes_remaining = num_bytes - bytenum;
-    //         // spin wait for byte to arrive
-    //         while self.bus.icsr2.read().rdrf().bit_is_clear() {
-    //             cortex_m::asm::nop();
-    //         }
-    //
-    //         // If we're on the 2nd to last byte, we need to do some magic
-    //         if bytes_remaining == 2 {
-    //             self.bus.icmr3.modify(|_, w| w.wait().set_bit());
-    //         }
-    //         if bytes_remaining == 1 {
-    //             // If we're about to read the final bit, request a stop condition
-    //             self.bus.iccr2.modify(|_, w| w.sp().set_bit());
-    //         }
-    //
-    //         *read_buffer = self.bus.icdrr.read().icdrr().bits();
-    //
-    //         // If at least one more byte remains to be read, ack the transaction
-    //         if bytes_remaining >= 2 {
-    //             self.bus.icmr3.modify(|_, w| w.ackbt().clear_bit());
-    //         } else {
-    //             // if this is the final byte, nack the transaction
-    //             self.bus.icmr3.modify(|_, w| w.ackbt().set_bit());
-    //         }
-    //     }
-    //
-    //     // Relock the ack bit
-    //     self.bus.icmr3.modify(|_, w| w.ackwp().clear_bit());
-    //
-    //     // Stop bus if appropriate (we already requested a stop condition before
-    //     // we read the final bit though?)
-    //     if stop {
-    //         self.bus.icsr2.modify(|_, w| w.stop().clear_bit());
-    //         self.stop_bus();
-    //     }
-    //
-    //     Ok(())
-    // }
+    pub fn read_blocking(
+        &self,
+        address: SevenBitAddress,
+        buffer: &mut [u8],
+        start: bool,
+        _stop: bool,
+    ) -> Result<(), I2cError> {
+        let bus = unsafe { &*I::reg_block() };
+
+        // Push the data into the global buffer so we can get it from the interrupt
+        free(|cs| {
+            let mut rx = I2C_GLOBAL.borrow(cs).borrow_mut();
+
+            if buffer.len() > BUFF_SIZE {
+                // Passed buffer is larger than max length read
+                // if we had ring buffers we could have "infinite" length reads
+                // but then I don't know how we get them out
+                self.stop_bus();
+                defmt::panic!("Read is too long");
+            }
+
+            rx.state = BusState::Reading(address, 0, buffer.len());
+        });
+        // If we have a "start", we need to prep the registers
+        // Read the BBSY flag in ICCR2, then set ST in ICCR2 to 1
+        // Maybe this should go in the handler too?
+        if start {
+            // defmt::println!("Starting Bus");
+            if bus.iccr2.read().bbsy().bit_is_set() {
+                // Return an error, bus is busy
+                // opt is spin-wait until unbusy, but that could hang if there is an issue
+                defmt::println!("bus busy");
+                return Err(I2cError::Bus);
+            }
+            // Issue start condition request
+            self.start_request();
+
+            // Wait for bus to move to transmit mode
+            // Timeout needed?
+            while bus.icsr2.read().tdre().bit_is_clear() {
+                cortex_m::asm::nop();
+                // self.stop_bus();
+                // return Err(I2cError::Bus);
+            }
+            // defmt::println!("In transmit mode for read more");
+        }
+
+        loop {
+            // wait for an interrupt and then check if we're done
+            cortex_m::asm::wfi();
+
+            let (state, data) = free(|cs| {
+                let globals = I2C_GLOBAL.borrow(cs).borrow();
+                (globals.state, globals.buffer)
+            });
+
+            match state {
+                BusState::Complete => {
+                    // give the user back the data
+                    buffer.copy_from_slice(&data[0..buffer.len()]);
+                    break;
+                }
+                BusState::Stopping | BusState::Error(_) => {
+                    // Docs say to dummy read after a nack?
+                    // Technically should come *after* the stop request.
+                    // but before the bus actually stops?
+                    // let _ = bus.icdrr.read().icdrr().bits();
+                    break;
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+
+        free(|cs| {
+            let mut globals = I2C_GLOBAL.borrow(cs).borrow_mut();
+            self.stop_bus();
+
+            if let BusState::Error(err) = globals.state {
+                globals.reset();
+                return Err(err);
+            };
+
+            globals.reset();
+            Ok(())
+        })
+    }
 }
 
 // Below here is for the embedded hal traits
