@@ -5,7 +5,7 @@ use crate::{
     interrupts::{Binding, Handler},
 };
 use cortex_m::interrupt::{Mutex, free};
-use embedded_hal::i2c::{self, Operation, SevenBitAddress};
+use embedded_hal::i2c::{self, I2c, Operation, SevenBitAddress};
 // use enum_dispatch::enum_dispatch;
 //
 // use ringbuf::StaticRb;
@@ -45,6 +45,7 @@ impl i2c::Error for I2cError {
 /// Internal buffer size in bytes.
 const BUFF_SIZE: usize = 32;
 
+// This has to be pub so we can propogate the Error back up to the caller.
 #[derive(Clone, Copy, PartialEq, defmt::Format)]
 pub enum BusState {
     Idle,
@@ -62,10 +63,10 @@ pub enum BusState {
 /// Not a huge fan of this global mutable, the other method impls a different
 /// &'static mutable on each i2c bus. Let's try that once I'm done here.
 #[derive(defmt::Format)]
-pub struct Transaction {
-    pub state: BusState,
-    pub buffer: [u8; BUFF_SIZE],
-    pub is_first_trans: bool,
+struct Transaction {
+    state: BusState,
+    buffer: [u8; BUFF_SIZE],
+    is_first_trans: bool,
 }
 
 #[allow(clippy::new_without_default)]
@@ -168,8 +169,8 @@ impl<I: I2cInstance> Handler for TEI_Handler<I> {
                 return;
             }
 
-            // Ignore clippy for now, maybe we want other stuff here later?
-            // TEI will fire after the first transmit of a 10 bit address.
+            // Ignore clippy for now, we will need to update this for 10 bit.
+            // TEI will fire after the first transmit of a 10 bit address in read mode.
             match globals.state {
                 BusState::Writing(_addr, idx, len) => {
                     if idx >= len {
@@ -247,11 +248,6 @@ impl<I: I2cInstance> Handler for TXI_Handler<I> {
                 }
                 _ => {}
             }
-            // defmt::println!("Leaving TXI");
-            // let iccr2 = bus_regs.iccr2.read().bits();
-            // defmt::println!("iccr2 0b{:08b}", iccr2);
-            // let icsr2 = bus_regs.icsr2.read().bits();
-            // defmt::println!("icsr2 0b{:08b}", icsr2);
         });
     }
 }
@@ -291,9 +287,7 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
             // if we have exactly 1, we set wait, then nack, then dummy read.
 
             // The docs say to issue stop with SP *before* reading the register.
-            // might need to issue the stop and set the bus to stopping
-            // and then have a "short stop" method if the bus stop has already
-            // been triggered so I don't deadlock
+            // but it seems to work just fine if I read the register first. Unsure...
             match globals.state {
                 BusState::Reading(_addr, idx, 1) => {
                     // Set Wait, Set Nack, dummy read, read, done
@@ -308,7 +302,7 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
                     // Dummy read
                     let _ = bus_regs.icdrr.read().icdrr().bits();
                     // Actual read
-                    // idx is always zero.
+                    // idx should always be zero for one byte reads.
                     globals.buffer[idx] = bus_regs.icdrr.read().icdrr().bits();
                     // Done
                     globals.state = BusState::Complete;
@@ -362,13 +356,13 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
                     // this is how many remain *after* the current read
                     let n_bytes_remaining = len - idx;
 
-                    // Note, this runs in the OPPOSITE order of the previous
+                    // Note, this logic is presented in the OPPOSITE order of the previous
                     // match arms. Here 0 is the final byte to read, not idx = 0.
                     match n_bytes_remaining {
                         0 => {
                             // Final byte to read, set stop, read, clear wait flag.
                             // again, I set stop after reading, this might need to
-                            // be changed.
+                            // be changed. Also manual says to dummy read after nack? Why?
                             // Read
                             globals.buffer[idx - 1] = bus_regs.icdrr.read().icdrr().bits();
                             // Clear wait
@@ -589,7 +583,7 @@ impl<I: I2cInstance> I2cBus<I> {
         address: SevenBitAddress,
         buffer: &[u8],
         start: bool,
-        _stop: bool,
+        stop: bool,
     ) -> Result<(), I2cError> {
         let bus = unsafe { &*I::reg_block() };
 
@@ -606,7 +600,6 @@ impl<I: I2cInstance> I2cBus<I> {
 
             // put the data into the buffer
             // if we had a ringbuffer this would also work.
-            // defmt::println!("Pushing data");
             if !buffer.is_empty() {
                 tx.buffer[0..buffer.len()].copy_from_slice(buffer);
             }
@@ -628,19 +621,12 @@ impl<I: I2cInstance> I2cBus<I> {
             self.start_request();
 
             // Wait for bus to move to transmit mode
+            // Should I have a timeout here?
             while bus.icsr2.read().tdre().bit_is_clear() {
                 cortex_m::asm::nop();
-                // self.stop_bus();
-                // return Err(I2cError::Bus);
             }
-            // defmt::println!("In transmit mode");
         }
 
-        // defmt::println!("Moving to txi loop");
-        // let iccr2 = bus.iccr2.read().bits();
-        // defmt::println!("iccr2 0b{:08b}", iccr2);
-        // let icsr2 = bus.icsr2.read().bits();
-        // defmt::println!("icsr2 0b{:08b}", icsr2);
         // below this is the interrupt driven part
         loop {
             // wait for an interrupt and then check if we're done
@@ -660,7 +646,9 @@ impl<I: I2cInstance> I2cBus<I> {
 
         free(|cs| {
             let mut globals = I2C_GLOBAL.borrow(cs).borrow_mut();
-            self.stop_bus();
+            if stop {
+                self.stop_bus();
+            }
 
             if let BusState::Error(err) = globals.state {
                 globals.reset();
@@ -683,7 +671,7 @@ impl<I: I2cInstance> I2cBus<I> {
         address: SevenBitAddress,
         buffer: &mut [u8],
         start: bool,
-        _stop: bool,
+        stop: bool,
     ) -> Result<(), I2cError> {
         let bus = unsafe { &*I::reg_block() };
 
@@ -740,11 +728,16 @@ impl<I: I2cInstance> I2cBus<I> {
                     buffer.copy_from_slice(&data[0..buffer.len()]);
                     break;
                 }
-                BusState::Stopping | BusState::Error(_) => {
+                BusState::Stopping => {
+                    break;
+                }
+                BusState::Error(_) => {
                     // Docs say to dummy read after a nack?
                     // Technically should come *after* the stop request.
                     // but before the bus actually stops?
-                    // let _ = bus.icdrr.read().icdrr().bits();
+                    // NACK -> Stop Request -> Dummy read -> bus stop.
+                    // Does this break if I do it here?
+                    let _ = bus.icdrr.read().icdrr().bits();
                     break;
                 }
                 _ => {
@@ -755,7 +748,9 @@ impl<I: I2cInstance> I2cBus<I> {
 
         free(|cs| {
             let mut globals = I2C_GLOBAL.borrow(cs).borrow_mut();
-            self.stop_bus();
+            if stop {
+                self.stop_bus();
+            }
 
             if let BusState::Error(err) = globals.state {
                 globals.reset();
@@ -792,3 +787,37 @@ impl Kind for i2c::Operation<'_> {
         }
     }
 }
+
+// TODO: Is there a nice way to do this without a ton of custom logic?
+
+// impl<I: I2cInstance> I2c for I2cBus<I> {
+//     fn transaction(
+//         &mut self,
+//         address: u8,
+//         operations: &mut [Operation<'_>],
+//     ) -> Result<(), Self::Error> {
+//         // First op in plan
+//         let mut ops = operations.iter_mut();
+//
+//         // Do the first op
+//         if let Some(prev_op) = ops.next() {
+//             // do I need a "prep" method?
+//             // Step 1, do the first operation with a start
+//             match prev_op {
+//                 Operation::Read(rb) => self.read_blocking(address, rb, true, false)?,
+//                 Operation::Write(wb) => self.write_blocking(address, wb, true, false)?,
+//             }
+//
+//             for op in ops {
+//                 match (&prev_op, &op) {
+//                     (Operation::Read(_), Operation::Write())
+//
+//                 }
+//             }
+//         }
+//
+//         // All done, stop bus.
+//         self.stop_bus();
+//         Ok(())
+//     }
+// }
