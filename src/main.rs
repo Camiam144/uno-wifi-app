@@ -7,8 +7,9 @@ use uno_wifi_app::hal::i2c::{I2cBus, enable_qwiic_bus};
 use uno_wifi_app::hal::timer::{TimerExt, enable_agtimers, enable_gptimers};
 use uno_wifi_app::led_matrix::{self, LEDMatrix};
 use uno_wifi_app::millis_timer::{self, MillisTimer, millis};
-use uno_wifi_app::modulinos::{ModulinoThermo, TemperatureUnits};
-// use uno_wifi_app::modulinos::ModulinoPixels;
+use uno_wifi_app::modulinos::{
+    Button, ModulinoButtons, ModulinoPixels, ModulinoThermo, TemperatureUnits,
+};
 use uno_wifi_app::{bind_interrupts, hal};
 // use uno_wifi_app::time::SYSCLK_FREQ;
 use uno_wifi_app::{self as _}; // global logger + panicking-behavior + memory layout
@@ -102,10 +103,21 @@ fn main() -> ! {
 
     let qwiic_bus = I2cBus::new(iic0_bus, p401, p400, QwiicIrq);
 
-    let mut thermo_modulino = ModulinoThermo::new(qwiic_bus);
+    // let mut thermo_modulino = ModulinoThermo::new(qwiic_bus);
 
-    let update_dir = 1500;
+    let mut buttons_modulino = ModulinoButtons::new(qwiic_bus);
+    // match buttons_modulino.set_leds(1, 1, 1) {
+    //     Ok(()) => {}
+    //     Err(err) => {
+    //         defmt::println!("Error: {}", err);
+    //     }
+    // }
+
+    let button_tick = 1000;
     let mut last_update = millis();
+    // let mut a = true;
+    // let mut b = false;
+    // let mut c = false;
     defmt::println!("Entering main loop");
     loop {
         if millis() - last_snake >= snake_tick_dur {
@@ -119,24 +131,53 @@ fn main() -> ! {
             display_matrix.render_flatmap(&flat_bitmap);
         }
 
-        if millis() - last_update >= update_dir {
-            last_update = millis();
+        // match buttons_modulino.set_leds(a, b, c) {
+        //     Ok(()) => {}
+        //     Err(err) => {
+        //         defmt::println!("Error {}", err);
+        //     }
+        // }
+        // let old_a = a;
+        // let old_b = b;
+        // let old_c = c;
+        // b = old_a;
+        // c = old_b;
+        // a = old_c;
+        match buttons_modulino.update() {
+            Ok(true) => {
+                defmt::info!("Modulino update triggered");
+                if buttons_modulino.is_pressed(Button::A) {
+                    defmt::println!("A");
+                }
+                if buttons_modulino.is_pressed(Button::B) {
+                    defmt::println!("B");
+                }
+                if buttons_modulino.is_pressed(Button::C) {
+                    defmt::println!("C");
+                }
 
-            let (stale, pct_h, temperature) =
-                match thermo_modulino.read_data(TemperatureUnits::Fahrenheit) {
-                    Ok(val) => val,
+                let btn_a = buttons_modulino.is_pressed(Button::A);
+                let btn_b = buttons_modulino.is_pressed(Button::B);
+                let btn_c = buttons_modulino.is_pressed(Button::C);
+
+                // add a short delay so we don't screw up the bus
+                let now = millis();
+
+                while millis() - now < 5 {
+                    cortex_m::asm::nop();
+                }
+                //
+                match buttons_modulino.set_leds(btn_a, btn_b, btn_c) {
+                    Ok(()) => {}
                     Err(err) => {
-                        defmt::println!("Thermo read error {}", err);
-                        uno_wifi_app::exit();
+                        defmt::println!("Error button leds {}", err);
                     }
-                };
-
-            defmt::println!(
-                "Stale {}, Pct H {}%, Temp {} deg",
-                stale,
-                pct_h,
-                temperature
-            );
+                }
+            }
+            Err(err) => {
+                defmt::println!("Err buttons {}", err);
+            }
+            _ => {}
         }
 
         cortex_m::asm::wfi();

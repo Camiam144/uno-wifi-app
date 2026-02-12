@@ -8,16 +8,15 @@ use crate::{
     scale,
 };
 
+// Not sure if ADDR lives here, there are several modulinos that can have the
+// address updated.
 pub trait Modulino {
     const ADDR: SevenBitAddress;
 
     fn address(&self) -> SevenBitAddress {
         Self::ADDR
     }
-    // Eventually will need something like a "write" or "read" method here
-    // should I determine writable vs readable modulinos?
-    // Honestly, the write and read functions should just be an appropriate
-    // transaction function from the i2c impl.
+    // If I implement the same thing on multiple modulinos, put it in here.
 }
 
 #[derive(Copy, Clone)]
@@ -48,6 +47,7 @@ pub struct ModulinoPixels<I: I2cInstance> {
     pixels: [Pixel; 8],
 }
 
+// Can be a custom address
 impl<I: I2cInstance> Modulino for ModulinoPixels<I> {
     const ADDR: SevenBitAddress = 0x36;
 }
@@ -138,10 +138,6 @@ impl<I: I2cInstance> ModulinoThermo<I> {
         (temp as f32 / (16384.0 - 1.0)) * 165.0 - 40.0
     }
 
-    pub fn address(&self) -> SevenBitAddress {
-        Self::ADDR
-    }
-
     /// Read all of the values from the probe. It takes the same amount of time
     /// to read all of the values so might as well read them all
     ///
@@ -185,5 +181,71 @@ impl<I: I2cInstance> ModulinoThermo<I> {
             TemperatureUnits::Fahrenheit => temp_c * 9.0 / 5.0 + 32.0,
         };
         Ok((stale, final_humidity, final_temp))
+    }
+}
+
+pub enum Button {
+    A,
+    B,
+    C,
+}
+
+pub struct ModulinoButtons<I: I2cInstance> {
+    last_status: [u8; 3],
+    pub bus: I2cBus<I>,
+}
+
+// Can be a custom address
+impl<I: I2cInstance> Modulino for ModulinoButtons<I> {
+    const ADDR: SevenBitAddress = 0x3E;
+}
+
+/// Button Modulino
+/// Still need to implement the advanced feature library
+impl<I: I2cInstance> ModulinoButtons<I> {
+    // TODO: Add Debouncing
+    pub fn new(i2cbus: I2cBus<I>) -> Self {
+        ModulinoButtons {
+            last_status: [0; 3],
+            bus: i2cbus,
+        }
+    }
+
+    pub fn is_pressed(&self, button: Button) -> bool {
+        // Use not matches! so clippy is happy
+        !matches!(self.last_status[button as usize], 0)
+    }
+
+    pub fn update(&mut self) -> Result<bool, I2cError> {
+        let mut read_buffer: [u8; 4] = [0; 4];
+
+        match self
+            .bus
+            .read_blocking(self.address(), &mut read_buffer, true, true)
+        {
+            Ok(_) => {}
+            Err(err) => {
+                defmt::println!("Read error {}", err);
+            }
+        }
+        // defmt::println!("buf {:?}", read_buffer,);
+
+        // First byte is pinstrap address from module so we can ignore it
+        let was_updated: bool = read_buffer[1] != self.last_status[0]
+            || read_buffer[2] != self.last_status[1]
+            || read_buffer[3] != self.last_status[2];
+
+        self.last_status[0] = read_buffer[1];
+        self.last_status[1] = read_buffer[2];
+        self.last_status[2] = read_buffer[3];
+        Ok(was_updated)
+    }
+
+    pub fn set_leds(&self, a: bool, b: bool, c: bool) -> Result<(), I2cError> {
+        let values = [a.into(), b.into(), c.into()];
+        // defmt::println!("Setting LEDS {} {} {}", values[0], values[1], values[2]);
+        self.bus
+            .write_blocking(self.address(), &values, true, true)?;
+        Ok(())
     }
 }

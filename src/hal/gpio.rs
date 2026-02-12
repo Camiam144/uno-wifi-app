@@ -140,7 +140,7 @@ pub trait PinPull: Sized {
 
 impl PinPull for Input {
     fn set_internal_resistor(&mut self, _resistor: Pull) {}
-    fn internal_resistor(mut self, _resistor: Pull) -> Self {
+    fn internal_resistor(self, _resistor: Pull) -> Self {
         self
     }
 }
@@ -382,6 +382,11 @@ impl<const P: u8, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
         state: PinState,
     ) -> Pin<P, N, Output<PushPull>> {
         self._set_state(state);
+        self.into_mode()
+    }
+
+    pub fn into_open_drain_output(mut self) -> Pin<P, N, Output<OutputOpenDrain>> {
+        self._set_low();
         self.into_mode()
     }
     /// Puts `self` into the provided mode `M` in place.

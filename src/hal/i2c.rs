@@ -290,6 +290,7 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
             // but it seems to work just fine if I read the register first. Unsure...
             match globals.state {
                 BusState::Reading(_addr, idx, 1) => {
+                    // Single byte read
                     // Set Wait, Set Nack, dummy read, read, done
                     // Wait
                     bus_regs.icmr3.modify(|_, w| w.wait().set_bit());
@@ -308,10 +309,8 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
                     globals.state = BusState::Complete;
                 }
                 BusState::Reading(addr, idx, 2) => {
+                    // Two byte read
                     // Set Wait, Dummy read, then nack, read, read, done.
-                    // This could live in an "outer match" like BusState::Reading(addr, N, 2)
-                    // where I move through the various Ns
-                    // but I think this is clearer for now.
                     match idx {
                         0 => {
                             // On first RXI fire, set wait, dummy read.
@@ -352,6 +351,7 @@ impl<I: I2cInstance> Handler for RXI_Handler<I> {
                     }
                 }
                 BusState::Reading(addr, idx, len) => {
+                    // >= 3 byte read
                     // Check how many bytes are remaining
                     // this is how many remain *after* the current read
                     let n_bytes_remaining = len - idx;
@@ -426,6 +426,7 @@ impl<I: I2cInstance> Handler for NAK_Handler<I> {
         // Clear ICU interrupt
         let p = unsafe { ra4m1::Peripherals::steal() };
         p.ICU.ielsr[interrupt as usize].modify(|_, w| w.ir().clear_bit());
+        // defmt::println!("Nack ERI");
 
         // Error the bus, the error state will cause the main loop to stop
         // the bus.
@@ -472,28 +473,30 @@ impl<I: I2cInstance> I2cBus<I> {
             + Binding<RXI_Handler<I>>
             + Binding<NAK_Handler<I>>,
     {
-        // Init the bus
-        let sda_pin = sda_pin.into_pullup_input().internal_resistor(Pull::Up);
-        let scl_pin = scl_pin.into_pullup_input().internal_resistor(Pull::Up);
+        // Put pins in the right state for use
+        let sda_pin = sda_pin
+            .into_open_drain_output()
+            .into_pullup_input()
+            .internal_resistor(Pull::Up);
+        let scl_pin = scl_pin
+            .into_open_drain_output()
+            .into_pullup_input()
+            .internal_resistor(Pull::Up);
 
         let iic0_bus = unsafe { &*I::reg_block() };
 
         // Set the pins to the right setting (IIC0 and also as peripheral functions)
-        // I should be able to set OpenDrain on the pin itself.
-        sda_pin
-            .pmnpfs_reg()
-            .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
+        sda_pin.pmnpfs_reg().modify(|_, w| w.pmr().set_bit());
         sda_pin
             .pmnpfs_reg()
             .modify(|_, w| unsafe { w.psel().bits(0b00111) });
 
-        scl_pin
-            .pmnpfs_reg()
-            .modify(|_, w| w.pmr().set_bit().ncodr().set_bit());
+        scl_pin.pmnpfs_reg().modify(|_, w| w.pmr().set_bit());
         scl_pin
             .pmnpfs_reg()
             .modify(|_, w| unsafe { w.psel().bits(0b00111) });
 
+        // Init the bus
         // Follow the steps outlined in figure 29.5 in manual:
         // SCL0, SDA0 pins not driven
         iic0_bus.iccr1.modify(|_, w| w.ice().clear_bit());
@@ -505,9 +508,9 @@ impl<I: I2cInstance> I2cBus<I> {
         // for now we will leave the icmr1 clock as the default PCLKB clock,
         // which is running at 24 MHz. Standard slow mode is 100 kHz. I have these
         // precalculated and hardcoded for now, eventually will want 400 kHz too.
-        iic0_bus.icmr1.modify(|_, w| w.cks()._011());
-        iic0_bus.icbrh.modify(|_, w| unsafe { w.brh().bits(0xA) });
-        iic0_bus.icbrl.modify(|_, w| unsafe { w.brl().bits(0xC) });
+        iic0_bus.icmr1.modify(|_, w| w.cks()._010());
+        iic0_bus.icbrh.modify(|_, w| unsafe { w.brh().bits(22) });
+        iic0_bus.icbrl.modify(|_, w| unsafe { w.brl().bits(27) });
         // I don't know how many interrupts to set. Maybe for now we use the four
         // noacknowledge, receive full, transmit end, and transmit empty.
 
@@ -557,6 +560,7 @@ impl<I: I2cInstance> I2cBus<I> {
     }
 
     fn stop_bus(&self) {
+        // defmt::println!("Stop rqst");
         let bus = unsafe { &*I::reg_block() };
         bus.icsr2.modify(|_, w| w.stop().clear_bit());
         bus.iccr2.modify(|_, w| w.sp().set_bit());
@@ -564,6 +568,9 @@ impl<I: I2cInstance> I2cBus<I> {
         while bus.icsr2.read().stop().bit_is_clear() {
             cortex_m::asm::nop();
         }
+
+        // defmt::println!("Stopped ok");
+
         // Clear STOP and NACKF flags so we're ready for another transaction
         bus.icsr2
             .modify(|_, w| w.stop().clear_bit().nackf().clear_bit());
@@ -625,6 +632,7 @@ impl<I: I2cInstance> I2cBus<I> {
             while bus.icsr2.read().tdre().bit_is_clear() {
                 cortex_m::asm::nop();
             }
+            // defmt::println!("Started ok");
         }
 
         // below this is the interrupt driven part
