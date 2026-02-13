@@ -487,6 +487,7 @@ impl<I: I2cInstance> I2cBus<I> {
 
         // Set the pins to the right setting (IIC0 and also as peripheral functions)
         sda_pin.pmnpfs_reg().modify(|_, w| w.pmr().set_bit());
+
         sda_pin
             .pmnpfs_reg()
             .modify(|_, w| unsafe { w.psel().bits(0b00111) });

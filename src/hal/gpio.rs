@@ -58,7 +58,7 @@ pub trait PinExt {
     type Mode;
     fn pin_id(&self) -> u8;
     fn port_id(&self) -> u8;
-    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>;
+    fn pmnpfs_reg(&self) -> &'static UniversalPfsReg;
 }
 
 /// Unsafe function to unlock the pin register.
@@ -178,7 +178,7 @@ impl PinMode for Output<PushPull> {
     const PMODE: Option<Modes> = Some(Modes::Output);
     const OUTTYPE: Option<OutputType> = Some(OutputType::PushPull);
 }
-const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS::PTR;
+// const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS::PTR;
 // const PMNPFS_REG_PORT_OFFSET: usize = 0x0040;
 // const PMNPFS_REG_PIN_OFFSET: usize = 0x0004;
 
@@ -187,6 +187,10 @@ const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS
 // P200, P214, P215, are specifically called out as input only.
 // P408 has a different DSCR1 reg, too
 // P914/915 I think are used for the USBFS
+
+// Generic type alias
+type UniversalPfsSpec = ra4m1::pfs::p408pfs::P408PFS_SPEC;
+type UniversalPfsReg = ra4m1::generic::Reg<UniversalPfsSpec>;
 
 /// Generic Pin type
 ///
@@ -197,25 +201,14 @@ const PMNPFS_BLOCK_BASE: *const crate::pac::pfs::RegisterBlock = crate::pac::PFS
 /// On this chip, pins are Input by default after a reset
 /// This current method means I cannot use pins 108, 109, 110, 201, 300, 408, or 914
 /// as they implement different register specs
-/// TODO: how do I do this nicely without needing to create a ton of different pins?
-/// this PAC has 4 extra types: p108pfs, p109pfs, p201pfs, and p408pfs to hold the
-/// different reset values. Probably have to make special pins for these. You can
-/// dereference the const ptr to the right pmnpfs but the spec type is different
+/// We're going to try a yolo that Gemini suggested with some prompting
+/// Going to alias some types, *technically* we could hit an issue where we
+/// use a field on a pin that isn't implemented, but, I mean, take your life into
+/// your own hands? Read the datasheet? As far as I can tell, p408pfs implements
+/// the most trait/fields/whatever.
+/// READ THE DATASHEET
 pub struct Pin<const P: u8, const N: u8, MODE = Input> {
     _mode: PhantomData<MODE>,
-    pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
-}
-impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
-    pub fn new(pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>) -> Self {
-        Self {
-            _mode: PhantomData,
-            pfsreg,
-        }
-    }
-    // #[inline(always)]
-    // fn pfs(&self) -> &crate::pac::pfs::RegisterBlock {
-    //     unsafe { &*pfs_ptr::<P, N>() }
-    // }
 }
 
 impl<const P: u8, const N: u8, MODE> defmt::Format for Pin<P, N, MODE> {
@@ -239,12 +232,33 @@ impl<const P: u8, const N: u8, MODE> PinExt for Pin<P, N, MODE> {
     fn port_id(&self) -> u8 {
         P
     }
-    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC> {
-        self.pfsreg
+    fn pmnpfs_reg(&self) -> &'static UniversalPfsReg {
+        Self::pfsreg()
     }
 }
 
+#[allow(clippy::new_without_default)]
 impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
+    pub fn new() -> Self {
+        Self { _mode: PhantomData }
+    }
+
+    // Little bit of math to get the right pin
+    const PFS_BASE_ADDR: usize = 0x4004_0800;
+    const PIN_PFS_OFFSET: usize = 0x04;
+    const PORT_PFS_OFFSET: usize = 0x40;
+    const fn register_addr() -> usize {
+        // calc is base + (64 * port) + (4 * pin)
+        Self::PFS_BASE_ADDR
+            + (Self::PORT_PFS_OFFSET * P as usize)
+            + (Self::PIN_PFS_OFFSET * N as usize)
+    }
+
+    #[inline(always)]
+    pub fn pfsreg() -> &'static UniversalPfsReg {
+        let addr = Self::register_addr();
+        unsafe { &*(addr as *const UniversalPfsReg) }
+    }
     /// Sets the output of the pin regardless of mode
     /// This can help avoid a short spike of the wrong value when changing pin
     /// mode into output.
@@ -257,27 +271,27 @@ impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     }
     #[inline(always)]
     fn _set_high(&mut self) {
-        self.pfsreg.modify(|_, w| w.podr().set_bit());
+        Self::pfsreg().modify(|_, w| w.podr().set_bit());
     }
     #[inline(always)]
     fn _set_low(&mut self) {
-        self.pfsreg.modify(|_, w| w.podr().clear_bit());
+        Self::pfsreg().modify(|_, w| w.podr().clear_bit());
     }
     #[inline(always)]
     fn _is_set_high(&self) -> bool {
-        self.pfsreg.read().pdr().bit_is_set()
+        Self::pfsreg().read().pdr().bit_is_set()
     }
     #[inline(always)]
     fn _is_set_low(&self) -> bool {
-        self.pfsreg.read().pdr().bit_is_clear()
+        Self::pfsreg().read().pdr().bit_is_clear()
     }
     #[inline(always)]
     fn _is_high(&self) -> bool {
-        self.pfsreg.read().pidr().bit_is_set()
+        Self::pfsreg().read().pidr().bit_is_set()
     }
     #[inline(always)]
     fn _is_low(&self) -> bool {
-        self.pfsreg.read().pidr().bit_is_clear()
+        Self::pfsreg().read().pidr().bit_is_clear()
     }
     #[inline(always)]
     pub fn is_low(&self) -> bool {
@@ -338,7 +352,7 @@ where
 {
     /// Set the internal resistor in-place
     pub fn set_internal_resistor(&mut self, resistor: Pull) {
-        self.pfsreg.modify(|_, w| w.pcr().bit(resistor.into()));
+        Self::pfsreg().modify(|_, w| w.pcr().bit(resistor.into()));
     }
     /// Set the internal resistor and create a new instance of Self
     pub fn internal_resistor(mut self, resistor: Pull) -> Self {
@@ -398,33 +412,33 @@ impl<const P: u8, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
         if MODE::OUTTYPE != M::OUTTYPE
             && let Some(outputtype) = M::OUTTYPE
         {
-            self.pfsreg.modify(|_, w| w.ncodr().bit(outputtype.into()));
+            Self::pfsreg().modify(|_, w| w.ncodr().bit(outputtype.into()));
         }
 
         if MODE::PMODE != M::PMODE
             && let Some(mode) = M::PMODE
         {
-            self.pfsreg.modify(|_, w| w.pdr().bit(mode.into()));
+            Self::pfsreg().modify(|_, w| w.pdr().bit(mode.into()));
         }
     }
     /// Consume the pin and get a new one with the specified mode.
     #[inline(always)]
     pub fn into_mode<M: PinMode>(mut self) -> Pin<P, N, M> {
         self.mode::<M>();
-        Pin::new(self.pfsreg)
+        Pin::new()
     }
 
     /// Into a fully erased dynamic pin. Dynamic pin starts as floating input
     #[inline]
     pub fn into_fully_erased_dynamic(self) -> DynamicPinErased {
-        DynamicPinErased::new(P, N, erased::Dynamic::InputFloating, self.pfsreg)
+        DynamicPinErased::new(P, N, erased::Dynamic::InputFloating, Self::pfsreg())
     }
 }
 impl<const P: u8, const N: u8, MODE> Pin<P, N, MODE> {
     /// Erases the pin number and port from the type.
     /// Useful when you need an array of pins with the same type
     pub fn erase(self) -> AnyPin<MODE> {
-        AnyPin::new(P, N, self.pfsreg)
+        AnyPin::new(P, N, Self::pfsreg())
     }
 }
 impl<const P: u8, const N: u8, MODE> From<Pin<P, N, MODE>> for AnyPin<MODE> {
@@ -436,11 +450,9 @@ impl<const P: u8, const N: u8, MODE> From<Pin<P, N, MODE>> for AnyPin<MODE> {
 
 // Macro for each port. Right now I just ignore pins I don't have set up or
 // are reserved for something
-// TODO: Some pins come in an array of pmnpfs like port 1. idk what to do, different macro?
-// Maybe I'll just implement those manually.
 #[macro_export]
 macro_rules! gpio_port {
-    ($PortN: ident, $PORTUPPER: ident, $portlower: ident, $port_num: expr, [$(($Pinupper: ident, $Pinlower:ident, $pin_num: expr,  $pfs:ident),)+]) => {
+    ($PortN: ident, $PORTUPPER: ident, $portlower: ident, $port_num: expr, [$(($Pinupper: ident, $Pinlower:ident, $pin_num: expr),)+]) => {
         pub mod $portlower {
         use $crate::hal::gpio::*;
             pub struct $PortN;
@@ -455,7 +467,7 @@ macro_rules! gpio_port {
         fn split(self) -> Parts {
         Parts {
         $(
-        $Pinlower: $Pinupper::new(unsafe { (*PMNPFS_BLOCK_BASE).$pfs()}),
+        $Pinlower: $Pinupper::new(),
         )+
         }
         }
@@ -468,24 +480,3 @@ macro_rules! gpio_port {
 }
 
 // These can all be in separate .rs files
-pub struct Port5;
-pub struct Port9;
-
-pub struct P500;
-pub struct P501;
-pub struct P502;
-
-pub struct Port5Pins {
-    pub p500: P500,
-    pub p501: P501,
-    pub p502: P502,
-}
-
-// Pins Cannot be output
-pub struct P914;
-pub struct P915;
-
-pub struct Port9Pins {
-    pub p914: P914,
-    pub p915: P915,
-}

@@ -2,7 +2,7 @@
 
 use embedded_hal::digital::{ErrorKind, PinState};
 
-use crate::hal::gpio::{Input, Output, PinMode, PushPull};
+use crate::hal::gpio::{Input, Output, PinMode, PushPull, UniversalPfsReg};
 
 use super::PinExt;
 use core::marker::PhantomData;
@@ -13,7 +13,7 @@ pub struct AnyPin<MODE> {
     // Bits 0-3 Pin: bits 4-7 port (only 9 ports total)
     pin_port: u8,
     _mode: PhantomData<MODE>,
-    pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
+    pfsreg: &'static UniversalPfsReg,
 }
 
 impl<MODE> PinExt for AnyPin<MODE> {
@@ -29,13 +29,12 @@ impl<MODE> PinExt for AnyPin<MODE> {
     }
 
     #[inline(always)]
-    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC> {
+    fn pmnpfs_reg(&self) -> &'static UniversalPfsReg {
         self.pfsreg
     }
 }
 
 impl<MODE> defmt::Format for AnyPin<MODE> {
-    // TODO: Add stripped_type_name like from stm32f4xx hal
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(
             fmt,
@@ -49,10 +48,7 @@ impl<MODE> defmt::Format for AnyPin<MODE> {
 
 // TODO: Write restore function to go from AnyPin -> Concrete Pin
 impl<MODE> AnyPin<MODE> {
-    pub fn from_pin_port(
-        pin_port: u8,
-        pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
-    ) -> Self {
+    pub fn from_pin_port(pin_port: u8, pfsreg: &'static UniversalPfsReg) -> Self {
         Self {
             pin_port,
             _mode: PhantomData,
@@ -62,11 +58,7 @@ impl<MODE> AnyPin<MODE> {
     pub fn into_pin_port(self) -> u8 {
         self.pin_port
     }
-    pub fn new(
-        port: u8,
-        pin: u8,
-        pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
-    ) -> Self {
+    pub fn new(port: u8, pin: u8, pfsreg: &'static UniversalPfsReg) -> Self {
         Self {
             pin_port: port << 4 | pin,
             _mode: PhantomData,
@@ -171,7 +163,7 @@ impl embedded_hal::digital::Error for PinModeError {
 pub struct DynamicPinErased {
     pin_port: u8,
     mode: Dynamic,
-    pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
+    pfsreg: &'static UniversalPfsReg,
 }
 
 impl defmt::Format for DynamicPinErased {
@@ -218,17 +210,12 @@ impl PinExt for DynamicPinErased {
     }
 
     #[inline(always)]
-    fn pmnpfs_reg(&self) -> &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC> {
+    fn pmnpfs_reg(&self) -> &'static UniversalPfsReg {
         self.pfsreg
     }
 }
 impl DynamicPinErased {
-    pub fn new(
-        port: u8,
-        pin: u8,
-        mode: Dynamic,
-        pfsreg: &'static ra4m1::generic::Reg<ra4m1::pfs::p000pfs::P000PFS_SPEC>,
-    ) -> Self {
+    pub fn new(port: u8, pin: u8, mode: Dynamic, pfsreg: &'static UniversalPfsReg) -> Self {
         Self {
             pin_port: port << 4 | pin,
             mode,
